@@ -56,7 +56,7 @@ import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 import requests
 import serial
@@ -558,19 +558,30 @@ class RigctldClient:
         self._transact("T 0")
 
 
-def find_rigctld_executable() -> str | None:
-    """Locates rigctld without requiring the user to add Hamlib to PATH
-    themselves - checks PATH first, then the default Windows install
-    location (Hamlib's own installer doesn't add itself to PATH)."""
+def find_rigctld_executable(manual_path: str = "") -> str | None:
+    """Locates rigctld. Checks, in order: a manually configured path (for
+    the common case of Hamlib's Windows builds being a plain zip the user
+    extracts anywhere, not an installer that adds itself to PATH or a
+    fixed folder), then PATH, then a couple of common default install
+    locations."""
+    manual_path = (manual_path or "").strip()
+    if manual_path and Path(manual_path).is_file():
+        return manual_path
+
     exe = shutil.which("rigctld")
     if exe:
         return exe
+
     if sys.platform == "win32":
+        candidates = []
         for envvar in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
             base = os.environ.get(envvar)
-            if not base:
-                continue
-            candidate = Path(base) / "Hamlib" / "bin" / "rigctld.exe"
+            if base:
+                candidates.append(Path(base) / "Hamlib" / "bin" / "rigctld.exe")
+        for base in (os.environ.get("LOCALAPPDATA"), "C:\\"):
+            if base:
+                candidates.append(Path(base) / "Hamlib" / "bin" / "rigctld.exe")
+        for candidate in candidates:
             if candidate.is_file():
                 return str(candidate)
     return None
@@ -980,6 +991,7 @@ class App(tk.Tk):
         self.rig_models: list[tuple[int, str, str]] = []
         self.rig_model_displays: list[str] = []
         self.rig_model_display_var = tk.StringVar(value=config.get("rig_model_display", ""))
+        self.rigctld_path_var = tk.StringVar(value=config.get("rigctld_path", ""))
         self.tune_power_var = tk.DoubleVar(value=float(TUNE_POWER_WATTS_DEFAULT))
         self.power_unit_var = tk.StringVar(value="Leistung (W)")
         self.offset_var = tk.IntVar(value=TUNE_OFFSET_HZ_DEFAULT)
@@ -1262,6 +1274,31 @@ class App(tk.Tk):
 
         model_combo.bind("<KeyRelease>", filter_models)
 
+        rigctld_path_row = row(rigctld_frame, "rigctld-Pfad")
+        rigctld_path_entry = ttk.Entry(
+            rigctld_path_row, textvariable=self.rigctld_path_var, style="Dark.TEntry", width=22,
+        )
+        rigctld_path_entry.pack(side="left")
+        rigctld_path_entry.bind("<FocusOut>", lambda _e: self._save_rigctld_path())
+
+        def browse_rigctld() -> None:
+            filetypes = [("rigctld.exe", "rigctld.exe"), ("Alle Dateien", "*.*")]
+            path = filedialog.askopenfilename(title="rigctld auswählen", filetypes=filetypes)
+            if path:
+                self.rigctld_path_var.set(path)
+                self._save_rigctld_path()
+                refresh_models()
+
+        _chip_button(rigctld_path_row, "Durchsuchen…", command=browse_rigctld).pack(side="left", padx=4)
+
+        tk.Label(
+            rigctld_frame,
+            text="Nur nötig, falls rigctld nicht automatisch gefunden wird (z. B.\n"
+                 "Hamlib als .zip entpackt statt über einen Installer eingerichtet) -\n"
+                 "auf rigctld.exe zeigen, leer lassen für automatische Suche.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 8), justify="left",
+        ).pack(anchor="w", padx=14, pady=(0, 4))
+
         host_row = row(rigctld_frame, "Host")
         ttk.Entry(host_row, textvariable=self.host_var, style="Dark.TEntry", width=16).pack(side="left")
 
@@ -1334,9 +1371,12 @@ class App(tk.Tk):
     # -- rigctld model list / auto-launch --------------------------------------
 
     def _load_rig_models(self) -> list[str]:
-        exe = find_rigctld_executable()
+        exe = find_rigctld_executable(self.rigctld_path_var.get())
         if not exe:
-            self._log("rigctld nicht gefunden - Hamlib installieren (hamlib.github.io) oder zum PATH hinzufügen.")
+            self._log(
+                "rigctld nicht gefunden - Hamlib installieren (hamlib.github.io), zum PATH "
+                "hinzufügen oder den rigctld-Pfad oben manuell eintragen."
+            )
             return self.rig_model_displays
         try:
             self.rig_models = list_rig_models(exe)
@@ -1361,6 +1401,11 @@ class App(tk.Tk):
         config = load_config()
         config["rig_model_display"] = display
         config["rig_model_id"] = model_id
+        save_config(config)
+
+    def _save_rigctld_path(self) -> None:
+        config = load_config()
+        config["rigctld_path"] = self.rigctld_path_var.get().strip()
         save_config(config)
 
     # -- CAT trace dialog -----------------------------------------------------
@@ -1457,11 +1502,12 @@ class App(tk.Tk):
                 if not serial_port:
                     messagebox.showerror("Fehler", "Bitte den CAT-Port des Funkgeräts auswählen.")
                     return
-                exe = find_rigctld_executable()
+                exe = find_rigctld_executable(self.rigctld_path_var.get())
                 if not exe:
                     messagebox.showerror(
                         "rigctld nicht gefunden",
-                        "Hamlib ist nicht installiert oder rigctld nicht im PATH.\n"
+                        "Hamlib ist nicht installiert, rigctld nicht im PATH und kein\n"
+                        "rigctld-Pfad in den Settings eingetragen.\n"
                         "Siehe https://hamlib.github.io/",
                     )
                     return

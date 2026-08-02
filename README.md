@@ -79,6 +79,17 @@ In den **Settings** lässt sich zwischen zwei Backends wählen:
   einem bereits andernorts laufenden `rigctld` (Rig-Modell-Auswahl wird
   dann ignoriert):
 
+  **"rigctld nicht gefunden" unter Windows:** Die Windows-Builds von
+  Hamlib sind meist ein reines .zip zum Selbst-Entpacken, kein Installer –
+  die App findet `rigctld.exe` automatisch nur, wenn es im PATH liegt oder
+  unter `...\Hamlib\bin\rigctld.exe` (Program Files, ProgramW6432 oder
+  LocalAppData). Liegt es woanders (z. B. `C:\hamlib-w64-4.x\bin\rigctld.exe`),
+  entweder diesen `bin`-Ordner zum PATH hinzufügen, oder – einfacher – in
+  den Settings unter "Hamlib rigctld" das neue Feld **"rigctld-Pfad"**
+  ausfüllen (über "Durchsuchen…" direkt auf `rigctld.exe` zeigen). Wird
+  lokal in `pota_tune_assist_config.json` gespeichert und ab dann für
+  Modell-Liste und Auto-Start verwendet.
+
   ```bash
   rigctld -m <Modell-Nr.> -r COM5        # Windows-Beispiel
   rigctld -m <Modell-Nr.> -r /dev/ttyUSB0  # Linux-Beispiel
