@@ -44,9 +44,13 @@ QRZ-Upload – alles in einer Oberfläche.
   ist bei jedem Start wieder leer). "Skip" blendet einzelne Spots aus,
   "Alle anzeigen" setzt das zurück.
 - **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, HEUTE,
-  FREQ, MODE, REF, NAME, LOC, AGE) sortiert danach, erneuter Klick dreht
+  FREQ, MODE, REF, NAME, LOC, KM, AGE) sortiert danach, erneuter Klick dreht
   die Richtung um (▲/▼ im Spaltenkopf). ⭐-Favoriten und 🏕-Draußenfunker
   bleiben dabei immer oben, unabhängig von der gewählten Sortierung.
+- **Entfernung zum Aktivator (KM)** – optionale Spalte, berechnet per
+  QRZ.com-XML-Lookup (eigenes, kostenpflichtiges QRZ-Abo nötig); erscheint
+  nur, wenn QRZ-Zugangsdaten + eigener Locator in den Settings hinterlegt
+  sind, sonst komplett ausgeblendet und keine Abfragen.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
   beim FT-710-CAT-Backend), hilfreich bei Frequenz-/Mode-Problemen.
 - **Zuverlässige CAT-Kommunikation** – Frequenz- und Mode-Befehle werden bei
@@ -300,6 +304,31 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    durchgestrichen dargestellt (in gedämpftem Grün) – so bleibt erkennbar,
    welche Stationen aus der aktuellen Spot-Liste schon geloggt wurden, ohne
    sie wie "Skip" komplett auszublenden.
+
+## Entfernung zum Aktivator (KM-Spalte)
+
+Optional, erfordert eine **kostenpflichtige QRZ.com-XML-Lookup-Subscription**
+(ein eigener QRZ.com-Login, nicht der Logbook-API-Key von oben – separates
+QRZ-Feature/Abo). In den **Settings** unter "QRZ XML-Lookup" **QRZ-Benutzer**
+und **QRZ-Passwort** eintragen, dazu oben unter "Log / QRZ Logbook" den
+**eigenen Locator** (Maidenhead, z. B. `JO40`) ausfüllen und "Speichern"
+klicken.
+
+- Sind alle drei Felder ausgefüllt, erscheint automatisch eine neue Spalte
+  **KM** in der Spot-Tabelle, und die App fragt für **jeden** Spot per
+  QRZ-XML-API die Position des Aktivator-Rufzeichens ab (Ergebnis pro
+  Rufzeichen für die laufende Sitzung zwischengespeichert, damit derselbe
+  Aktivator nicht mehrfach abgefragt wird) und berechnet die Luftlinien-
+  Entfernung zu deinem eigenen Locator. Die Spalte ist wie alle anderen
+  sortierbar.
+- Fehlt eines der drei Felder (Benutzer, Passwort oder eigener Locator),
+  bleibt die KM-Spalte komplett ausgeblendet und es werden **keinerlei**
+  QRZ-XML-Abfragen ausgeführt.
+- Schlägt der QRZ-Login fehl (falsche Zugangsdaten), erscheint das einmalig
+  in der Statuszeile und die App versucht es nicht automatisch erneut –
+  Zugangsdaten korrigieren und neu speichern, um es erneut zu versuchen.
+- Findet QRZ zu einem Rufzeichen keine Position, bleibt die KM-Zelle für
+  diesen Spot leer.
 
 ## Heute schon gearbeitet / New Band-Mode-Park
 

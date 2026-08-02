@@ -42,6 +42,7 @@ power is a level, not watts.
 from __future__ import annotations
 
 import json
+import math
 import os
 import queue
 import re
@@ -53,6 +54,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.parse
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -850,6 +852,104 @@ def fetch_pota_spots() -> list[Spot]:
     return spots
 
 
+def grid_to_latlon(grid: str) -> tuple[float, float] | None:
+    """Center coordinates of a Maidenhead grid square (4 or 6+ chars) -
+    used to place "Eig. Locator" on the map for the distance column."""
+    grid = (grid or "").strip().upper()
+    if len(grid) < 4 or not grid[:2].isalpha() or not grid[2:4].isdigit():
+        return None
+    try:
+        lon = (ord(grid[0]) - ord("A")) * 20 - 180
+        lat = (ord(grid[1]) - ord("A")) * 10 - 90
+        lon += int(grid[2]) * 2
+        lat += int(grid[3]) * 1
+        if len(grid) >= 6 and grid[4].isalpha() and grid[5].isalpha():
+            lon += (ord(grid[4]) - ord("A")) * (2 / 24) + (1 / 24)
+            lat += (ord(grid[5]) - ord("A")) * (1 / 24) + (0.5 / 24)
+        else:
+            lon += 1.0
+            lat += 0.5
+    except (ValueError, IndexError):
+        return None
+    return lat, lon
+
+
+def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 6371.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dlambda / 2) ** 2
+    return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
+
+
+class QrzXmlError(Exception):
+    pass
+
+
+class QrzXmlAuthError(QrzXmlError):
+    pass
+
+
+class QrzXmlClient:
+    """Thin client for QRZ.com's XML lookup API (a separate subscription
+    and separate username/password login from the QRZ Logbook API used
+    for ADIF uploads) - resolves a callsign to the lat/lon from the
+    operator's QRZ profile, used for the spot table's distance column."""
+
+    def __init__(self) -> None:
+        self.session_key: str | None = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _request(params: dict) -> ET.Element:
+        resp = requests.get(QRZ_XML_URL, params=params, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+        for elem in root.iter():
+            if "}" in elem.tag:
+                elem.tag = elem.tag.split("}", 1)[1]
+        return root
+
+    def _authenticate(self, username: str, password: str) -> None:
+        root = self._request({"username": username, "password": password})
+        error = root.findtext("./Session/Error")
+        if error:
+            self.session_key = None
+            raise QrzXmlAuthError(error)
+        key = root.findtext("./Session/Key")
+        if not key:
+            self.session_key = None
+            raise QrzXmlAuthError("QRZ-Login: keine Session erhalten.")
+        self.session_key = key
+
+    def lookup_latlon(self, username: str, password: str, callsign: str) -> tuple[float, float] | None:
+        with self._lock:
+            if not self.session_key:
+                self._authenticate(username, password)
+            root = self._request({"s": self.session_key, "callsign": callsign})
+            error = root.findtext("./Session/Error")
+            if error and "session" in error.lower():
+                self._authenticate(username, password)
+                root = self._request({"s": self.session_key, "callsign": callsign})
+                error = root.findtext("./Session/Error")
+            if error:
+                if "not found" in error.lower():
+                    return None
+                raise QrzXmlError(error)
+            lat = root.findtext("./Callsign/lat")
+            lon = root.findtext("./Callsign/lon")
+            if lat is None or lon is None:
+                return None
+            try:
+                return float(lat), float(lon)
+            except ValueError:
+                return None
+
+
 def format_spot_time(iso_time: str) -> str:
     try:
         dt = datetime.strptime(iso_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
@@ -1025,6 +1125,13 @@ class App(tk.Tk):
         self.my_callsign_var = tk.StringVar(value=config.get("my_callsign", ""))
         self.my_grid_var = tk.StringVar(value=config.get("my_gridsquare", ""))
         self.qrz_api_key_var = tk.StringVar(value=config.get("qrz_api_key", ""))
+        self.qrz_xml_user_var = tk.StringVar(value=config.get("qrz_xml_username", ""))
+        self.qrz_xml_pass_var = tk.StringVar(value=config.get("qrz_xml_password", ""))
+        self.qrz_xml_client = QrzXmlClient()
+        self.qrz_xml_auth_failed = False
+        self.locator_cache: dict[str, tuple[float, float] | None] = {}
+        self.locator_lookup_pending: set[str] = set()
+        self.locator_result_queue: queue.Queue = queue.Queue()
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
         self.outdoor_calls: set[str] = set()
 
@@ -1163,25 +1270,31 @@ class App(tk.Tk):
         table_frame = tk.Frame(self, bg=COL_BG)
         table_frame.pack(fill="both", expand=True, padx=12, pady=6)
 
-        columns = ("fav", "outdoor", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc", "age", "skip", "log")
+        columns = (
+            "fav", "outdoor", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc",
+            "dist", "age", "skip", "log",
+        )
         headers = {
             "fav": "", "outdoor": "", "qsy": "", "call": "CALLSIGN", "worked": "HEUTE", "freq": "FREQ (KHZ)",
-            "mode": "MODE", "ref": "REF", "name": "NAME", "loc": "LOC", "age": "AGE", "skip": "", "log": "",
+            "mode": "MODE", "ref": "REF", "name": "NAME", "loc": "LOC", "dist": "KM", "age": "AGE",
+            "skip": "", "log": "",
         }
         widths = {
             "fav": 30, "outdoor": 30, "qsy": 60, "call": 90, "worked": 220, "freq": 90, "mode": 70,
-            "ref": 90, "name": 260, "loc": 70, "age": 60, "skip": 60, "log": 70,
+            "ref": 90, "name": 260, "loc": 70, "dist": 55, "age": 60, "skip": 60, "log": 70,
         }
         self.column_headers = headers
-        sortable_columns = {"call", "worked", "freq", "mode", "ref", "name", "loc", "age"}
+        self.all_columns = columns
+        sortable_columns = {"call", "worked", "freq", "mode", "ref", "name", "loc", "dist", "age"}
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
         for col in columns:
             if col in sortable_columns:
                 self.tree.heading(col, text=headers[col], command=lambda c=col: self._sort_by_column(c))
             else:
                 self.tree.heading(col, text=headers[col])
-            anchor = "center" if col in ("fav", "outdoor", "qsy", "skip", "mode", "age", "loc") else "w"
+            anchor = "center" if col in ("fav", "outdoor", "qsy", "skip", "mode", "age", "loc", "dist") else "w"
             self.tree.column(col, width=widths[col], anchor=anchor)
+        self._update_dist_column_visibility()
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview,
                              style="Dark.Vertical.TScrollbar")
@@ -1405,7 +1518,30 @@ class App(tk.Tk):
         ttk.Entry(qrz_row, textvariable=self.qrz_api_key_var, style="Dark.TEntry", width=28, show="•").pack(side="left")
 
         tk.Label(
-            dlg, text="QRZ XML/Logbook-API-Key aus dem QRZ-Logbook (Subscription\nManagement). Leer lassen, um nicht zu QRZ hochzuladen.",
+            dlg, text="QRZ-Logbook-API-Key aus dem QRZ-Logbook (Settings -> API Key).\n"
+                      "Leer lassen, um nicht zu QRZ hochzuladen.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
+        ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+
+        tk.Label(dlg, text="QRZ XML-Lookup (Entfernung zum Aktivator)", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
+
+        qrz_xml_user_row = row(dlg, "QRZ-Benutzer")
+        ttk.Entry(qrz_xml_user_row, textvariable=self.qrz_xml_user_var, style="Dark.TEntry", width=20).pack(side="left")
+
+        qrz_xml_pass_row = row(dlg, "QRZ-Passwort")
+        ttk.Entry(
+            qrz_xml_pass_row, textvariable=self.qrz_xml_pass_var, style="Dark.TEntry", width=20, show="•",
+        ).pack(side="left")
+
+        tk.Label(
+            dlg, text="Eigener QRZ.com-Login (nicht der Logbook-API-Key oben) - nötig für\n"
+                      "die kostenpflichtige XML-Lookup-Funktion. Nur mit eingetragenem\n"
+                      "'Eig. Locator' oben und beiden Feldern hier erscheint die KM-Spalte\n"
+                      "in der Spot-Liste und wird pro Spot automatisch abgefragt. Leer\n"
+                      "lassen (eines der Felder reicht) = Spalte bleibt aus, keine Abfragen.",
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
@@ -1416,7 +1552,12 @@ class App(tk.Tk):
             "my_callsign": self.my_callsign_var.get().strip().upper(),
             "my_gridsquare": self.my_grid_var.get().strip().upper(),
             "qrz_api_key": self.qrz_api_key_var.get().strip(),
+            "qrz_xml_username": self.qrz_xml_user_var.get().strip(),
+            "qrz_xml_password": self.qrz_xml_pass_var.get().strip(),
         })
+        self.qrz_xml_auth_failed = False
+        self.qrz_xml_client.session_key = None
+        self._update_dist_column_visibility()
         self._log("Log-/QRZ-Einstellungen gespeichert.")
 
     # -- rigctld model list / auto-launch --------------------------------------
@@ -1882,11 +2023,66 @@ class App(tk.Tk):
     def _is_outdoor(self, spot: Spot) -> bool:
         return (spot.activator or "").strip().upper() in self.outdoor_calls
 
+    # -- QRZ XML distance lookup --------------------------------------------------
+
+    def _qrz_xml_ready(self) -> bool:
+        return bool(
+            self.qrz_xml_user_var.get().strip()
+            and self.qrz_xml_pass_var.get().strip()
+            and not self.qrz_xml_auth_failed
+        )
+
+    def _update_dist_column_visibility(self) -> None:
+        show_dist = self._qrz_xml_ready()
+        self.tree["displaycolumns"] = [c for c in self.all_columns if show_dist or c != "dist"]
+
+    def _spot_distance_km(self, spot: Spot) -> float | None:
+        if not self._qrz_xml_ready():
+            return None
+        my_latlon = grid_to_latlon(self.my_grid_var.get())
+        if my_latlon is None:
+            return None
+        target = self.locator_cache.get((spot.activator or "").strip().upper())
+        if not target:
+            return None
+        return haversine_km(my_latlon[0], my_latlon[1], target[0], target[1])
+
+    def _format_distance(self, spot: Spot) -> str:
+        dist = self._spot_distance_km(spot)
+        return f"{dist:.0f}" if dist is not None else ""
+
+    def _queue_locator_lookups(self, spots: list[Spot]) -> None:
+        if not self._qrz_xml_ready():
+            return
+        username = self.qrz_xml_user_var.get().strip()
+        password = self.qrz_xml_pass_var.get().strip()
+        calls = {(s.activator or "").strip().upper() for s in spots if s.activator}
+        for call in calls:
+            if not call or call in self.locator_cache or call in self.locator_lookup_pending:
+                continue
+            self.locator_lookup_pending.add(call)
+            threading.Thread(
+                target=self._lookup_locator_async, args=(username, password, call), daemon=True,
+            ).start()
+
+    def _lookup_locator_async(self, username: str, password: str, call: str) -> None:
+        try:
+            latlon = self.qrz_xml_client.lookup_latlon(username, password, call)
+        except QrzXmlAuthError as exc:
+            self.locator_result_queue.put(("auth_error", call, str(exc)))
+            return
+        except (QrzXmlError, requests.RequestException) as exc:
+            self.locator_result_queue.put(("error", call, str(exc)))
+            return
+        self.locator_result_queue.put(("ok", call, latlon))
+
     def _column_sort_key(self, col: str):
         if col == "freq":
             return lambda s: s.frequency_khz
         if col == "age":
             return lambda s: spot_age_seconds(s.spot_time)
+        if col == "dist":
+            return lambda s: (d if (d := self._spot_distance_km(s)) is not None else 10**9)
         if col == "call":
             return lambda s: (s.activator or "").upper()
         if col == "mode":
@@ -1974,6 +2170,7 @@ class App(tk.Tk):
                 spot.reference,
                 name,
                 spot.location_desc,
+                self._format_distance(spot),
                 format_age(spot.spot_time),
                 "✕ Skip",
                 "📝 Log",
@@ -1983,16 +2180,32 @@ class App(tk.Tk):
     def _on_tree_click(self, event) -> None:
         row_id = self.tree.identify_row(event.y)
         col_id = self.tree.identify_column(event.x)
-        if not row_id:
+        if not row_id or not col_id:
             return
-        if col_id == "#1":
+        # identify_column() numbers columns by their current *display*
+        # position, not their fixed position in `columns` - and the "dist"
+        # column is shown/hidden at runtime (see _update_dist_column_
+        # visibility), which shifts everything after it. Resolve the
+        # clicked column name from the live displaycolumns instead of a
+        # hardcoded "#N", so Skip/Log etc. keep working either way.
+        try:
+            idx = int(col_id.lstrip("#")) - 1
+        except ValueError:
+            return
+        displaycols = self.tree["displaycolumns"]
+        if displaycols in ("#all", ""):
+            displaycols = self.all_columns
+        if not (0 <= idx < len(displaycols)):
+            return
+        col = displaycols[idx]
+        if col == "fav":
             self._toggle_favorite(int(row_id))
-        elif col_id == "#3":
+        elif col == "qsy":
             self._qsy_to_spot_id(int(row_id))
-        elif col_id == "#12":
+        elif col == "skip":
             self.skipped_ids.add(int(row_id))
             self._render_spots()
-        elif col_id == "#13":
+        elif col == "log":
             self._open_log_dialog_for_spot_id(int(row_id))
 
     def _on_tree_double_click(self, event) -> None:
@@ -2256,6 +2469,7 @@ class App(tk.Tk):
                     self._check_new_priority_spots(payload)
                     self.spots = payload
                     self._update_country_options()
+                    self._queue_locator_lookups(payload)
                     self._render_spots()
                     self._log(f"{len(self.spots)} Spots aktualisiert.")
                 else:
@@ -2276,6 +2490,26 @@ class App(tk.Tk):
                 self._log(f"{len(self.outdoor_calls)} Draußenfunker-Rufzeichen geladen.")
         except queue.Empty:
             pass
+
+        locator_changed = False
+        try:
+            while True:
+                kind, call, payload = self.locator_result_queue.get_nowait()
+                self.locator_lookup_pending.discard(call)
+                if kind == "ok":
+                    self.locator_cache[call] = payload
+                    locator_changed = True
+                elif kind == "error":
+                    self.locator_cache[call] = None
+                    locator_changed = True
+                elif kind == "auth_error":
+                    self.qrz_xml_auth_failed = True
+                    self._update_dist_column_visibility()
+                    self._log(f"QRZ-XML-Login fehlgeschlagen: {payload}")
+        except queue.Empty:
+            pass
+        if locator_changed:
+            self._render_spots()
 
         if self.tune.active and self.tune.elapsed() > MAX_TUNE_SECONDS:
             self.tune.stop()
