@@ -54,6 +54,7 @@ import threading
 import time
 import tkinter as tk
 import urllib.parse
+import webbrowser
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1445,6 +1446,7 @@ class App(tk.Tk):
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
         self.tree.bind("<Button-1>", self._on_tree_click)
+        self.tree.bind("<Motion>", self._on_tree_motion)
 
         # -- tune bar ---------------------------------------------------------
         tune_bar = tk.Frame(self, bg=COL_PANEL)
@@ -2328,16 +2330,7 @@ class App(tk.Tk):
         # visibility), which shifts everything after it. Resolve the
         # clicked column name from the live displaycolumns instead of a
         # hardcoded "#N", so Skip/Log etc. keep working either way.
-        try:
-            idx = int(col_id.lstrip("#")) - 1
-        except ValueError:
-            return
-        displaycols = self.tree["displaycolumns"]
-        if displaycols in ("#all", ""):
-            displaycols = self.all_columns
-        if not (0 <= idx < len(displaycols)):
-            return
-        col = displaycols[idx]
+        col = self._resolve_display_column(col_id)
         if col == "fav":
             self._toggle_favorite(int(row_id))
         elif col == "qsy":
@@ -2347,6 +2340,40 @@ class App(tk.Tk):
             self._render_spots()
         elif col == "log":
             self._open_log_dialog_for_spot_id(int(row_id))
+        elif col == "call":
+            self._open_pota_profile(int(row_id))
+        elif col == "name":
+            self._open_pota_park(int(row_id))
+
+    def _on_tree_motion(self, event) -> None:
+        col_id = self.tree.identify_column(event.x)
+        row_id = self.tree.identify_row(event.y)
+        col = self._resolve_display_column(col_id) if row_id else None
+        self.tree.configure(cursor="hand2" if col in ("call", "name") else "")
+
+    def _resolve_display_column(self, col_id: str) -> str | None:
+        try:
+            idx = int(col_id.lstrip("#")) - 1
+        except ValueError:
+            return None
+        displaycols = self.tree["displaycolumns"]
+        if displaycols in ("#all", ""):
+            displaycols = self.all_columns
+        if not (0 <= idx < len(displaycols)):
+            return None
+        return displaycols[idx]
+
+    def _open_pota_profile(self, spot_id: int) -> None:
+        spot = next((s for s in self.spots if s.spot_id == spot_id), None)
+        call = (spot.activator or "").strip().upper() if spot else ""
+        if call:
+            webbrowser.open(f"https://pota.app/#/profile/{call}")
+
+    def _open_pota_park(self, spot_id: int) -> None:
+        spot = next((s for s in self.spots if s.spot_id == spot_id), None)
+        ref = (spot.reference or "").strip().upper() if spot else ""
+        if ref:
+            webbrowser.open(f"https://pota.app/#/park/{ref}")
 
     def _on_tree_double_click(self, event) -> None:
         row_id = self.tree.identify_row(event.y)

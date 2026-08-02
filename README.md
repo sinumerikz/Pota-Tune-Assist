@@ -201,7 +201,12 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    fette Schrift statt der normalen Mode-Farbcodierung. Die **🏕-Spalte**
    links daneben markiert Rufzeichen aus der Draußenfunker-Liste (siehe
    unten) mit eigenem blaugrünem Zeilenhintergrund – auch diese Spots
-   erscheinen ganz oben (nach den Favoriten).
+   erscheinen ganz oben (nach den Favoriten). **CALLSIGN** und **NAME**
+   (Parkname) sind klickbare Links (Mauszeiger wechselt beim Drüberfahren
+   zur Hand): Klick auf das Rufzeichen öffnet das POTA-Profil des
+   Aktivierenden im Browser, Klick auf den Parknamen die POTA-Referenzseite
+   des Parks – beides öffnet sich zusätzlich zum normalen QSY/Favorit-Klick
+   in den jeweiligen Spalten.
 4. **TUNE (halten)**-Knopf gedrückt halten → Versatz (siehe unten), CW, 5 W,
    Dauerton. Loslassen → zurück auf die vorherige Frequenz/Mode/Leistung.
    Ein 10-Sekunden-Sicherheits-Timeout schaltet automatisch ab.
