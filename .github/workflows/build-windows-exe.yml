@@ -43,12 +43,13 @@ jobs:
         shell: bash
         run: |
           cp dist/POTA-Tune-Assist.exe POTA-Tune-Assist.exe
+          git rev-parse --short HEAD > VERSION
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- POTA-Tune-Assist.exe; then
+          if git diff --quiet -- POTA-Tune-Assist.exe VERSION; then
             echo "exe unchanged, nothing to commit."
             exit 0
           fi
-          git add POTA-Tune-Assist.exe
+          git add POTA-Tune-Assist.exe VERSION
           git commit -m "Automated build: update POTA-Tune-Assist.exe [skip ci]"
           git push origin HEAD:main

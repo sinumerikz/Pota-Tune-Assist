@@ -137,6 +137,19 @@ oder `requirements.txt` auf `main` neu committet, nicht von Hand. Windows
 SmartScreen warnt bei unsignierten .exe-Dateien aus dem Internet – das ist
 bei selbst gebauten PyInstaller-Programmen normal.
 
+**Automatische Update-Prüfung:** Die .exe vergleicht bei jedem Start ihre
+lokale `VERSION`-Datei (liegt neben der .exe, wird vom Build-Workflow
+mitgeschrieben) mit der aktuellen `VERSION` auf `main`. Weicht sie ab, lädt
+die App die neue .exe im Hintergrund automatisch herunter (blockiert die
+Oberfläche nicht) – sobald der Download fertig ist, erscheint der grüne
+Button **"🔄 Update installieren"** neben "CAT-Log". Erst ein Klick darauf
+beendet die App und ersetzt die alte .exe durch die neue (per Hintergrund-
+Skript, da eine laufende .exe sich unter Windows nicht selbst überschreiben
+kann) und startet sie neu – kein automatischer Neustart ohne Bestätigung,
+und während TUNE aktiv ist, verweigert der Button das Update. Läuft die App
+aus dem Quellcode (`python pota_tune_assist.py`) statt als .exe, ist diese
+Funktion inaktiv – dort per `git pull` aktualisieren.
+
 ### Aus dem Quellcode starten (Windows/Mac/Linux)
 
 ```bash
