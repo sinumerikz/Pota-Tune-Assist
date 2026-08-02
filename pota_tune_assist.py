@@ -41,7 +41,6 @@ power is a level, not watts.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import os
@@ -51,7 +50,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import tkinter as tk
@@ -91,28 +89,6 @@ CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
 LOG_DIR = app_dir() / "logs"
 OUTDOOR_LIST_PATH = app_dir() / "draussenfunker.txt"
 OUTDOOR_LIST_URL = "https://calls.draussenfunker.de/df-polo-notes.txt"
-
-# Self-update: the build workflow patches APP_BUILD_VERSION below (via
-# sed, on the CI runner's working copy only - never committed back) to
-# the short commit SHA right before running PyInstaller, so the value is
-# baked directly into the compiled .exe. It also writes/commits the same
-# SHA to VERSION next to the exe as the "what's the latest build"
-# reference other installs check against. Deliberately NOT comparing two
-# separate on-disk files (local VERSION vs. remote VERSION): if a user
-# replaces only the .exe by hand (e.g. a plain browser download of just
-# that one file) without also updating a sidecar VERSION file, a
-# file-vs-file comparison would permanently claim "outdated" even on the
-# latest build. Comparing the version baked into the running exe itself
-# can't go out of sync that way - it always travels with the code that's
-# actually executing.
-APP_BUILD_VERSION = "dev"
-GITHUB_RAW_BASE = "https://raw.githubusercontent.com/sinumerikz/Pota-Tune-Assist/main"
-VERSION_PATH = app_dir() / "VERSION"
-VERSION_CHECK_URL = f"{GITHUB_RAW_BASE}/VERSION"
-EXE_DOWNLOAD_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe"
-EXE_CHECKSUM_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe.sha256"
-EXE_NAME = "POTA-Tune-Assist.exe"
-UPDATE_CHECK_INTERVAL_SECONDS = 60 * 60
 
 ADIF_HEADER = (
     "POTA Tune Assist ADIF Log\n"
@@ -179,109 +155,6 @@ def load_outdoor_calls() -> set[str]:
             return parse_outdoor_calls(f.read())
     except OSError:
         return set()
-
-
-def check_remote_version() -> str | None:
-    """Latest VERSION on `main`, or None if unreachable - never raises."""
-    try:
-        resp = requests.get(VERSION_CHECK_URL, timeout=10)
-        resp.raise_for_status()
-        return resp.text.strip()
-    except requests.RequestException:
-        return None
-
-
-def download_new_exe(dest: Path) -> None:
-    """Downloads the current .exe from `main` to `dest` (a *.new sibling
-    of the running exe, never the running file itself) and verifies it
-    against the SHA-256 the build workflow published alongside it. Raises
-    on any failure or mismatch - a partial/corrupt download (observed:
-    "Failed to load Python DLL" from a truncated onefile archive) must
-    never be swapped in."""
-    checksum_resp = requests.get(EXE_CHECKSUM_URL, timeout=10)
-    checksum_resp.raise_for_status()
-    expected_sha256 = checksum_resp.text.strip().split()[0].lower()
-
-    resp = requests.get(EXE_DOWNLOAD_URL, timeout=60)
-    resp.raise_for_status()
-    content = resp.content
-    if len(content) < 1_000_000:  # a real build is >10 MB; a few KB means an error page
-        raise ValueError(f"Heruntergeladene Datei ist verdächtig klein ({len(content)} Bytes).")
-
-    actual_sha256 = hashlib.sha256(content).hexdigest()
-    if actual_sha256 != expected_sha256:
-        raise ValueError(
-            f"Prüfsumme stimmt nicht überein (Download beschädigt?): "
-            f"erwartet {expected_sha256[:12]}…, erhalten {actual_sha256[:12]}…"
-        )
-
-    tmp = dest.with_suffix(dest.suffix + ".part")
-    with open(tmp, "wb") as f:
-        f.write(content)
-    tmp.replace(dest)
-
-
-def write_update_batch(pid: int, old_exe: Path, new_exe: Path) -> Path:
-    """A tiny helper script that waits for this process to actually exit
-    (a running .exe can't overwrite itself), then swaps the downloaded
-    build into place, relaunches, and deletes itself. The new .exe already
-    has its own version baked in (APP_BUILD_VERSION) - no separate VERSION
-    file needs writing/staying in sync here.
-
-    Written using ONLY single-line "if ... goto label" statements - no
-    parenthesized multi-line if-blocks. cmd.exe counts every "(" and ")"
-    inside an open parenthesized block, including ones that are just part
-    of echoed text ("(Versuch 1)") - that miscounts as the block's own
-    closing paren and garbles everything after it. Single-line "if ...
-    goto" has no such ambiguity, so echoed text can contain anything.
-
-    Uses "ping -n 2 127.0.0.1" instead of "timeout" for delays - timeout
-    needs an interactive console input handle and fails immediately when
-    launched without a real console window (which is how this script is
-    started)."""
-    log_path = app_dir() / "pota_tune_assist_update.log"
-    script = (
-        "@echo off\r\n"
-        f'echo [%date% %time%] Update-Skript gestartet fuer PID {pid} > "{log_path}"\r\n'
-        "set COUNT=0\r\n"
-        ":waitloop\r\n"
-        "set /a COUNT+=1\r\n"
-        "if %COUNT% GTR 30 goto forcemove\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
-        "if errorlevel 1 goto forcemove\r\n"
-        "ping -n 2 127.0.0.1 >NUL\r\n"
-        "goto waitloop\r\n"
-        ":forcemove\r\n"
-        f'echo [%date% %time%] Verschiebe exe - Versuch nach %COUNT% Wartezyklen >> "{log_path}"\r\n'
-        "set MOVECOUNT=0\r\n"
-        ":moveloop\r\n"
-        "set /a MOVECOUNT+=1\r\n"
-        f'move /Y "{new_exe}" "{old_exe}" >> "{log_path}" 2>&1\r\n'
-        # move deletes the source on success - if it's still there, the
-        # move failed (observed cause: the just-exited .exe's file handle
-        # / antivirus scan can hold a brief lock past process exit, per
-        # the "failed to remove temp directory" warning PyInstaller's
-        # onefile bootloader shows in that situation) - retry with a
-        # short backoff instead of giving up after a single attempt.
-        f'if not exist "{new_exe}" goto moveok\r\n'
-        "if %MOVECOUNT% GEQ 15 goto movefailed\r\n"
-        f'echo [%date% %time%] Verschieben fehlgeschlagen, wiederhole - Versuch %MOVECOUNT% >> "{log_path}"\r\n'
-        "ping -n 2 127.0.0.1 >NUL\r\n"
-        "goto moveloop\r\n"
-        ":moveok\r\n"
-        f'echo [%date% %time%] Verschieben erfolgreich nach %MOVECOUNT% Versuchen >> "{log_path}"\r\n'
-        "goto relaunch\r\n"
-        ":movefailed\r\n"
-        f'echo [%date% %time%] Verschieben nach %MOVECOUNT% Versuchen aufgegeben >> "{log_path}"\r\n'
-        ":relaunch\r\n"
-        f'echo [%date% %time%] Starte neu >> "{log_path}"\r\n'
-        f'start "" "{old_exe}"\r\n'
-        'del "%~f0"\r\n'
-    )
-    fd, path = tempfile.mkstemp(suffix=".bat", prefix="pota_tune_assist_update_")
-    with os.fdopen(fd, "w", encoding="ascii", errors="ignore") as f:
-        f.write(script)
-    return Path(path)
 
 
 def _adif_field(name: str, value: str) -> str:
@@ -1305,8 +1178,6 @@ class App(tk.Tk):
         self.locator_lookup_pending: set[str] = set()
         self.locator_result_queue: queue.Queue = queue.Queue()
         self.locator_work_queue: queue.Queue = queue.Queue()
-        self.update_result_queue: queue.Queue = queue.Queue()
-        self.pending_update_version: str | None = None
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
         self.outdoor_calls: set[str] = set()
 
@@ -1353,7 +1224,6 @@ class App(tk.Tk):
         threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
         for _ in range(LOCATOR_WORKER_COUNT):
             threading.Thread(target=self._locator_worker, daemon=True).start()
-        self._tick_update_check()
         self._tick_solar_data()
         self.after(200, self._tick)
         self._tick_clock()
@@ -1449,11 +1319,6 @@ class App(tk.Tk):
         _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
-        self.update_btn = _chip_button(filter_row, "🔄 Update installieren", command=self._apply_update)
-        self.update_btn.configure(bg=COL_GREEN, fg="white", activebackground=COL_GREEN)
-        # Not packed here on purpose - only shown once a new build has
-        # actually finished downloading (see _tick()'s update_result_queue
-        # handling), so it's invisible for the vast majority of runs.
 
         # -- table -----------------------------------------------------------
         table_frame = tk.Frame(self, bg=COL_BG)
@@ -2280,80 +2145,6 @@ class App(tk.Tk):
                 self.locator_result_queue.put(("error", call, "keine Zugangsdaten mehr hinterlegt"))
             self.locator_work_queue.task_done()
 
-    # -- self-update ---------------------------------------------------------------
-
-    def _tick_update_check(self) -> None:
-        if (
-            getattr(sys, "frozen", False)
-            and sys.platform == "win32"
-            and not self.pending_update_version
-        ):
-            threading.Thread(target=self._check_for_update_async, daemon=True).start()
-        self.after(UPDATE_CHECK_INTERVAL_SECONDS * 1000, self._tick_update_check)
-
-    def _check_for_update_async(self) -> None:
-        if APP_BUILD_VERSION == "dev":
-            # Not a CI build - either running from source, or the build
-            # workflow's version-baking step didn't apply for some reason.
-            # Logged (not just silently skipped) so that second case is
-            # visible instead of looking exactly like "no update needed".
-            self.update_result_queue.put(
-                ("error", "übersprungen - APP_BUILD_VERSION ist 'dev' (kein CI-Build erkannt)")
-            )
-            return
-        remote_version = check_remote_version()
-        if not remote_version:
-            self.update_result_queue.put(("error", "VERSION auf GitHub nicht erreichbar"))
-            return
-        if APP_BUILD_VERSION == remote_version:
-            self.update_result_queue.put(("uptodate", f"eigene Version {APP_BUILD_VERSION} = aktuell"))
-            return
-        self.update_result_queue.put(
-            ("checking", f"eigene Version {APP_BUILD_VERSION} → verfügbar {remote_version}")
-        )
-        new_exe_path = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
-        try:
-            download_new_exe(new_exe_path)
-        except (requests.RequestException, OSError, ValueError) as exc:
-            self.update_result_queue.put(("error", str(exc)))
-            return
-        self.update_result_queue.put(("ready", remote_version))
-
-    def _apply_update(self) -> None:
-        if not self.pending_update_version:
-            return
-        if self.tune.active:
-            messagebox.showwarning(
-                "TUNE aktiv", "Bitte zuerst TUNE loslassen, bevor die App aktualisiert wird.",
-            )
-            return
-        if not messagebox.askyesno(
-            "Update installieren",
-            f"Version {self.pending_update_version} wurde bereits heruntergeladen.\n"
-            "Die App wird jetzt beendet und automatisch mit der neuen Version neu "
-            "gestartet.\n\nJetzt fortfahren?",
-        ):
-            return
-        old_exe = Path(sys.executable)
-        new_exe = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
-        try:
-            batch_path = write_update_batch(os.getpid(), old_exe, new_exe)
-            # CREATE_NO_WINDOW alone (not combined with DETACHED_PROCESS -
-            # those two are contradictory: DETACHED_PROCESS means "no
-            # console at all", which breaks console-dependent commands
-            # like `timeout`/`ping` inside the batch script and made the
-            # whole update silently never run). CREATE_NEW_PROCESS_GROUP
-            # detaches it from our process so it survives after we exit.
-            subprocess.Popen(
-                ["cmd", "/c", str(batch_path)],
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
-            )
-        except OSError as exc:
-            messagebox.showerror("Update fehlgeschlagen", str(exc))
-            return
-        self.destroy()
-
     def _column_sort_key(self, col: str):
         if col == "freq":
             return lambda s: s.frequency_khz
@@ -2788,25 +2579,6 @@ class App(tk.Tk):
             pass
         if locator_changed:
             self._render_spots()
-
-        try:
-            while True:
-                kind, payload = self.update_result_queue.get_nowait()
-                if kind == "ready":
-                    self.pending_update_version = payload
-                    self.update_btn.pack(side="left", padx=4)
-                    self._log(
-                        f"Update bereit: Version {payload} heruntergeladen - "
-                        "'🔄 Update installieren' klicken, um zu übernehmen."
-                    )
-                elif kind == "uptodate":
-                    self._log(f"Update-Check: {payload}, kein Download nötig.")
-                elif kind == "checking":
-                    self._log(f"Update-Check: {payload} - lade im Hintergrund herunter...")
-                else:
-                    self._log(f"Update-Check fehlgeschlagen: {payload}")
-        except queue.Empty:
-            pass
 
         try:
             while True:

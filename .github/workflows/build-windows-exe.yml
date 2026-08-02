@@ -36,18 +36,6 @@ jobs:
           pip install -r requirements.txt
           pip install "pyinstaller>=6.6,<7"
 
-      # Bakes the commit SHA into APP_BUILD_VERSION on this runner's
-      # working copy only (never committed back) - the app then compares
-      # its own compiled-in version against VERSION on `main` instead of
-      # a separate local VERSION file, which could silently drift out of
-      # sync from the exe if a user ever replaces only one of the two.
-      - name: Bake build version into source
-        shell: bash
-        run: |
-          SHORT_SHA=$(git rev-parse --short HEAD)
-          sed -i "s/^APP_BUILD_VERSION = \"dev\"/APP_BUILD_VERSION = \"$SHORT_SHA\"/" pota_tune_assist.py
-          echo "Baked version: $SHORT_SHA"
-
       # Console build purely for the smoke test below - a --windowed exe
       # shows an unhandled exception as a blocking dialog (no stderr to
       # read from CI), a console build prints the traceback and exits
@@ -85,14 +73,12 @@ jobs:
         shell: bash
         run: |
           cp dist/POTA-Tune-Assist.exe POTA-Tune-Assist.exe
-          sha256sum POTA-Tune-Assist.exe | awk '{print $1}' > POTA-Tune-Assist.exe.sha256
-          git rev-parse --short HEAD > VERSION
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if git diff --quiet -- POTA-Tune-Assist.exe VERSION POTA-Tune-Assist.exe.sha256; then
+          if git diff --quiet -- POTA-Tune-Assist.exe; then
             echo "exe unchanged, nothing to commit."
             exit 0
           fi
-          git add POTA-Tune-Assist.exe VERSION POTA-Tune-Assist.exe.sha256
+          git add POTA-Tune-Assist.exe
           git commit -m "Automated build: update POTA-Tune-Assist.exe [skip ci]"
           git push origin HEAD:main

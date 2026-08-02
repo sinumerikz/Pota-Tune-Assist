@@ -143,35 +143,9 @@ damit kein kaputter Build im Repo landet. Windows SmartScreen warnt bei
 unsignierten .exe-Dateien aus dem Internet – das ist bei selbst gebauten
 PyInstaller-Programmen normal.
 
-**Automatische Update-Prüfung:** Der Build-Workflow schreibt die
-Commit-SHA direkt in den Quellcode (`APP_BUILD_VERSION`), bevor er die
-.exe baut – die Versionsnummer steckt also **in der .exe selbst**, nicht
-in einer separaten Datei daneben, die z. B. durch einen manuellen
-Download nur der .exe (ohne den Rest des Repos) veraltet zurückbleiben
-könnte. Die App vergleicht ihre eigene eingebaute Version beim Start **und
-danach stündlich im Hintergrund** mit der aktuellen `VERSION`-Datei auf
-`main`. Weicht sie ab, lädt die App die neue .exe im Hintergrund
-automatisch herunter (blockiert die Oberfläche nicht) und prüft sie gegen
-die vom Workflow mitcommittete
-`POTA-Tune-Assist.exe.sha256`-Prüfsumme – ein unvollständiger/beschädigter
-Download wird verworfen statt eingesetzt. Sobald der Download verifiziert
-ist, erscheint der grüne Button **"🔄 Update installieren"** neben
-"CAT-Log". Erst ein Klick darauf beendet die App und ersetzt die alte .exe
-durch die neue (per Hintergrund-Skript, da eine laufende .exe sich unter
-Windows nicht selbst überschreiben kann) und startet sie neu – kein
-automatischer Neustart ohne Bestätigung, und während TUNE aktiv ist,
-verweigert der Button das Update. Läuft die App aus dem Quellcode
-(`python pota_tune_assist.py`) statt als .exe, ist diese Funktion inaktiv
-(`APP_BUILD_VERSION` bleibt dort `"dev"`) – dort per `git pull`
-aktualisieren.
-
-Das Hintergrund-Skript protokolliert seinen Ablauf in
-`pota_tune_assist_update.log` neben der .exe (wann gestartet, wann
-verschoben, wann neu gestartet) – hilfreich, falls der Neustart nach einem
-Update mal ausbleiben sollte. Ist die alte .exe direkt nach dem Beenden
-noch kurz von Windows gesperrt (z. B. Antivirus-Scan), wiederholt das
-Skript das Verschieben automatisch bis zu 15× mit kurzer Pause, bevor es
-aufgibt.
+Es gibt keine automatische Update-Prüfung/Selbstaktualisierung – neue
+Versionen holst du dir per `git pull` bzw. durch erneutes Herunterladen
+von `POTA-Tune-Assist.exe` aus dem Repository.
 
 ### Aus dem Quellcode starten (Windows/Mac/Linux)
 
