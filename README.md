@@ -22,8 +22,8 @@ QRZ-Upload – alles in einer Oberfläche.
 - **Log Contact** – Klick auf "📝 Log" in einer Spot-Zeile öffnet einen
   vorausgefüllten QSO-Dialog (Rufzeichen, Datum/Zeit UTC, Band, Frequenz,
   Mode, RST, Name, Locator, POTA-Referenz, Kommentar); der Kontakt wird als
-  ADIF-Datensatz gespeichert und, falls ein QRZ-API-Key hinterlegt ist,
-  automatisch ins eigene QRZ-Logbuch hochgeladen.
+  ADIF-Datensatz gespeichert und, falls konfiguriert, automatisch ins
+  eigene QRZ-Logbuch **und/oder** eine eigene Wavelog-Instanz hochgeladen.
 - **"Heute schon gearbeitet"-Erkennung** – jeder Spot wird gegen das
   heutige Log abgeglichen und mit "♻ Heute schon gearbeitet" oder
   "🆕 New Band/Mode/Park (...)" markiert, je nachdem ob Band, Mode oder Park
@@ -294,7 +294,7 @@ tatsächliche VFO-Frequenz um den CW-Pitch/Offset. Würde man erst die
 Frequenz und danach den Mode setzen, würde der nachfolgende Moduswechsel die
 gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
 
-## Log Contact / ADIF / QRZ-Logbook
+## Log Contact / ADIF / QRZ-Logbook / Wavelog
 
 1. In den **Settings** unter "Log / QRZ Logbook" einmalig das eigene
    Rufzeichen (Pflichtfeld, sonst öffnet sich der Log-Dialog nicht), optional
@@ -304,18 +304,27 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    der Logbook-eigene). Diese Angaben werden lokal in `pota_tune_assist_config.json`
    neben dem Programm gespeichert. Ist kein API-Key hinterlegt, wird nur
    lokal geloggt, ohne QRZ-Upload.
-2. In der Spot-Tabelle auf **📝 Log** in der gewünschten Zeile klicken. Der
+2. Optional zusätzlich (oder alternativ) im Abschnitt **"Wavelog"**: eigene
+   **Server-URL** (z. B. `https://log.example.com`, ohne abschließenden
+   Slash – funktioniert mit selbst gehosteten wie mit gehosteten
+   Wavelog-Instanzen), **API-Key** (Wavelog → Settings → API Keys) und
+   **Station-Profil-ID** (Wavelog → Station Setup, meist `1` bei nur einem
+   Profil) eintragen. Erst wenn alle drei Felder ausgefüllt sind, wird
+   zusätzlich zu Wavelog hochgeladen.
+3. In der Spot-Tabelle auf **📝 Log** in der gewünschten Zeile klicken. Der
    Dialog ist mit Rufzeichen, aktuellem UTC-Datum/-Zeit, Band, Frequenz,
    Mode (aus dem Spot) sowie der POTA-Referenz als `SIG_INFO` vorausgefüllt
    und komplett editierbar (z. B. für RST, Name, Locator, Kommentar).
-3. **Log Contact** klicken: Der QSO wird als ADIF-Datensatz an
+4. **Log Contact** klicken: Der QSO wird als ADIF-Datensatz an
    `logs/pota_tune_assist_log_<QSO_DATE>.adi` angehängt – **pro Tag eine eigene
-   Datei**, ein neuer Tag landet nie in der Datei des Vortages. Ist ein
-   API-Key hinterlegt, wird derselbe Datensatz zusätzlich automatisch per
-   QRZ-Logbook-API (`https://logbook.qrz.com/api`, `ACTION=INSERT`) ins
-   eigene QRZ-Logbuch hochgeladen; Erfolg/Fehler erscheinen in der
+   Datei**, ein neuer Tag landet nie in der Datei des Vortages. Derselbe
+   Datensatz wird danach parallel per QRZ-Logbook-API
+   (`https://logbook.qrz.com/api`, `ACTION=INSERT`) und/oder per
+   Wavelog-API (`<Server-URL>/index.php/api/qso`) hochgeladen, je nachdem
+   welche der beiden oben konfiguriert sind – unabhängig voneinander,
+   beide gleichzeitig sind möglich; Erfolg/Fehler erscheinen jeweils in der
    Statusleiste.
-4. Der geloggte Spot bleibt in der Liste sichtbar, wird aber ab sofort
+5. Der geloggte Spot bleibt in der Liste sichtbar, wird aber ab sofort
    durchgestrichen dargestellt (in gedämpftem Grün) – so bleibt erkennbar,
    welche Stationen aus der aktuellen Spot-Liste schon geloggt wurden, ohne
    sie wie "Skip" komplett auszublenden.

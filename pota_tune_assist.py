@@ -288,6 +288,35 @@ def upload_to_qrz(api_key: str, adif_record: str) -> tuple[bool, str]:
         return True, parsed.get("LOGID", "")
     return False, parsed.get("REASON", resp.text)
 
+
+def upload_to_wavelog(base_url: str, api_key: str, station_profile_id: str, adif_record: str) -> tuple[bool, str]:
+    """POST a single ADIF record to a Wavelog (Cloudlog-API-compatible)
+    instance's QSO endpoint. Returns (success, message). base_url is the
+    user's own server (self-hosted or hosted), no fixed domain - the
+    `/index.php/api/qso` path works regardless of whether the instance has
+    pretty URLs/mod_rewrite enabled, since that's CodeIgniter's default
+    routable path."""
+    url = base_url.rstrip("/") + "/index.php/api/qso"
+    resp = requests.post(
+        url,
+        json={
+            "key": api_key,
+            "station_profile_id": station_profile_id,
+            "type": "adif",
+            "string": adif_record,
+        },
+        timeout=10,
+    )
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError:
+        return False, f"Unerwartete Antwort (kein JSON): {resp.text[:200]!r}"
+    status = str(data.get("status", "")).strip().lower()
+    if status in ("created", "success", "ok"):
+        return True, status or "ok"
+    return False, str(data.get("reason") or data.get("message") or data)
+
 CAT_BAUD_DEFAULT = 38400
 CAT_CMD_DELAY = 0.05
 CAT_REPLY_TIMEOUT = 0.3
@@ -1235,6 +1264,9 @@ class App(tk.Tk):
         self.my_callsign_var = tk.StringVar(value=config.get("my_callsign", ""))
         self.my_grid_var = tk.StringVar(value=config.get("my_gridsquare", ""))
         self.qrz_api_key_var = tk.StringVar(value=config.get("qrz_api_key", ""))
+        self.wavelog_url_var = tk.StringVar(value=config.get("wavelog_url", ""))
+        self.wavelog_api_key_var = tk.StringVar(value=config.get("wavelog_api_key", ""))
+        self.wavelog_station_id_var = tk.StringVar(value=config.get("wavelog_station_profile_id", ""))
         self.qrz_xml_user_var = tk.StringVar(value=config.get("qrz_xml_username", ""))
         self.qrz_xml_pass_var = tk.StringVar(value=config.get("qrz_xml_password", ""))
         self.qrz_xml_client = QrzXmlClient()
@@ -1646,6 +1678,35 @@ class App(tk.Tk):
 
         ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
 
+        tk.Label(dlg, text="Wavelog", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
+
+        wavelog_url_row = row(dlg, "Server-URL")
+        ttk.Entry(
+            wavelog_url_row, textvariable=self.wavelog_url_var, style="Dark.TEntry", width=28,
+        ).pack(side="left")
+
+        wavelog_key_row = row(dlg, "API-Key")
+        ttk.Entry(
+            wavelog_key_row, textvariable=self.wavelog_api_key_var, style="Dark.TEntry", width=28, show="•",
+        ).pack(side="left")
+
+        wavelog_station_row = row(dlg, "Station-Profil-ID")
+        ttk.Entry(
+            wavelog_station_row, textvariable=self.wavelog_station_id_var, style="Dark.TEntry", width=10,
+        ).pack(side="left")
+
+        tk.Label(
+            dlg, text="Eigene Wavelog-Instanz (z. B. https://log.example.com, ohne\n"
+                      "abschließenden Slash) - API-Key unter Settings -> API Keys im\n"
+                      "Wavelog erzeugen. Station-Profil-ID steht in Wavelog unter Station\n"
+                      "Setup (meist \"1\" bei nur einem Profil). Alle drei Felder nötig, sonst\n"
+                      "wird nicht zu Wavelog hochgeladen.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
+        ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+
         tk.Label(dlg, text="QRZ XML-Lookup (Entfernung zum Aktivator)", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
 
@@ -1673,6 +1734,9 @@ class App(tk.Tk):
             "my_callsign": self.my_callsign_var.get().strip().upper(),
             "my_gridsquare": self.my_grid_var.get().strip().upper(),
             "qrz_api_key": self.qrz_api_key_var.get().strip(),
+            "wavelog_url": self.wavelog_url_var.get().strip(),
+            "wavelog_api_key": self.wavelog_api_key_var.get().strip(),
+            "wavelog_station_profile_id": self.wavelog_station_id_var.get().strip(),
             "qrz_xml_username": self.qrz_xml_user_var.get().strip(),
             "qrz_xml_password": self.qrz_xml_pass_var.get().strip(),
         })
@@ -2561,6 +2625,16 @@ class App(tk.Tk):
                 target=self._upload_to_qrz_async, args=(api_key, record, call), daemon=True,
             ).start()
 
+        wavelog_url = self.wavelog_url_var.get().strip()
+        wavelog_key = self.wavelog_api_key_var.get().strip()
+        wavelog_station_id = self.wavelog_station_id_var.get().strip()
+        if wavelog_url and wavelog_key and wavelog_station_id:
+            threading.Thread(
+                target=self._upload_to_wavelog_async,
+                args=(wavelog_url, wavelog_key, wavelog_station_id, record, call),
+                daemon=True,
+            ).start()
+
         dlg.destroy()
 
     def _upload_to_qrz_async(self, api_key: str, record: str, call: str) -> None:
@@ -2573,6 +2647,19 @@ class App(tk.Tk):
             self.log_result_queue.put(f"QRZ-Logbuch: {call} hochgeladen (LOGID {info}).")
         else:
             self.log_result_queue.put(f"QRZ-Logbuch: Upload für {call} fehlgeschlagen ({info}).")
+
+    def _upload_to_wavelog_async(
+        self, base_url: str, api_key: str, station_profile_id: str, record: str, call: str,
+    ) -> None:
+        try:
+            ok, info = upload_to_wavelog(base_url, api_key, station_profile_id, record)
+        except requests.RequestException as exc:
+            self.log_result_queue.put(f"Wavelog-Upload für {call} fehlgeschlagen: {exc}")
+            return
+        if ok:
+            self.log_result_queue.put(f"Wavelog: {call} hochgeladen.")
+        else:
+            self.log_result_queue.put(f"Wavelog: Upload für {call} fehlgeschlagen ({info}).")
 
     # -- tune button ------------------------------------------------------------
 
