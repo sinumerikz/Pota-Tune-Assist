@@ -196,12 +196,17 @@ def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> 
     (a running .exe can't overwrite itself), then swaps the downloaded
     build into place, updates VERSION, relaunches, and deletes itself.
 
-    Uses "ping -n 2 127.0.0.1" instead of "timeout" for the wait loop's
-    delay - timeout needs an interactive console input handle and fails
-    immediately when launched without a real console window (which is how
-    this script is started), silently aborting the whole update before it
-    ever reached move/start. A capped iteration count plus a log file
-    guard against the same kind of silent, undiagnosable failure."""
+    Written using ONLY single-line "if ... goto label" statements - no
+    parenthesized multi-line if-blocks. cmd.exe counts every "(" and ")"
+    inside an open parenthesized block, including ones that are just part
+    of echoed text ("(Versuch 1)") - that miscounts as the block's own
+    closing paren and garbles everything after it. Single-line "if ...
+    goto" has no such ambiguity, so echoed text can contain anything.
+
+    Uses "ping -n 2 127.0.0.1" instead of "timeout" for delays - timeout
+    needs an interactive console input handle and fails immediately when
+    launched without a real console window (which is how this script is
+    started)."""
     log_path = app_dir() / "pota_tune_assist_update.log"
     script = (
         "@echo off\r\n"
@@ -211,12 +216,11 @@ def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> 
         "set /a COUNT+=1\r\n"
         "if %COUNT% GTR 30 goto forcemove\r\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
-        "if not errorlevel 1 (\r\n"
-        "  ping -n 2 127.0.0.1 >NUL\r\n"
-        "  goto waitloop\r\n"
-        ")\r\n"
+        "if errorlevel 1 goto forcemove\r\n"
+        "ping -n 2 127.0.0.1 >NUL\r\n"
+        "goto waitloop\r\n"
         ":forcemove\r\n"
-        f'echo [%date% %time%] Verschiebe exe (Versuch nach %COUNT% Wartezyklen) >> "{log_path}"\r\n'
+        f'echo [%date% %time%] Verschiebe exe - Versuch nach %COUNT% Wartezyklen >> "{log_path}"\r\n'
         "set MOVECOUNT=0\r\n"
         ":moveloop\r\n"
         "set /a MOVECOUNT+=1\r\n"
@@ -227,17 +231,17 @@ def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> 
         # the "failed to remove temp directory" warning PyInstaller's
         # onefile bootloader shows in that situation) - retry with a
         # short backoff instead of giving up after a single attempt.
-        f'if exist "{new_exe}" (\r\n'
-        "  if %MOVECOUNT% GEQ 15 (\r\n"
-        f'    echo [%date% %time%] Verschieben nach %MOVECOUNT% Versuchen aufgegeben >> "{log_path}"\r\n'
-        "    goto relaunch\r\n"
-        "  )\r\n"
-        f'  echo [%date% %time%] Verschieben fehlgeschlagen, wiederhole (Versuch %MOVECOUNT%) >> "{log_path}"\r\n'
-        "  ping -n 2 127.0.0.1 >NUL\r\n"
-        "  goto moveloop\r\n"
-        ")\r\n"
-        f'echo [%date% %time%] Verschieben erfolgreich nach %MOVECOUNT% Versuch(en) >> "{log_path}"\r\n'
+        f'if not exist "{new_exe}" goto moveok\r\n'
+        "if %MOVECOUNT% GEQ 15 goto movefailed\r\n"
+        f'echo [%date% %time%] Verschieben fehlgeschlagen, wiederhole - Versuch %MOVECOUNT% >> "{log_path}"\r\n'
+        "ping -n 2 127.0.0.1 >NUL\r\n"
+        "goto moveloop\r\n"
+        ":moveok\r\n"
+        f'echo [%date% %time%] Verschieben erfolgreich nach %MOVECOUNT% Versuchen >> "{log_path}"\r\n'
         f'> "{VERSION_PATH}" echo {version}\r\n'
+        "goto relaunch\r\n"
+        ":movefailed\r\n"
+        f'echo [%date% %time%] Verschieben nach %MOVECOUNT% Versuchen aufgegeben >> "{log_path}"\r\n'
         ":relaunch\r\n"
         f'echo [%date% %time%] Starte neu >> "{log_path}"\r\n'
         f'start "" "{old_exe}"\r\n'
