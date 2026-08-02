@@ -89,9 +89,12 @@ Zeilen für bereits geloggte Kontakte).
 ### Windows: fertige .exe
 
 [`POTA-Tune-Assist.exe`](POTA-Tune-Assist.exe) liegt bereits im Ordner –
-kein Python nötig, einfach starten. Windows SmartScreen warnt bei
-unsignierten .exe-Dateien aus dem Internet – das ist bei selbst gebauten
-PyInstaller-Programmen normal.
+kein Python nötig, einfach starten. Sie wird automatisch per GitHub-Actions-
+Workflow (`.github/workflows/build-windows-exe.yml`) auf einem echten
+`windows-latest`-Runner gebaut und bei Änderungen an `pota_tune_assist.py`
+oder `requirements.txt` auf `main` neu committet, nicht von Hand. Windows
+SmartScreen warnt bei unsignierten .exe-Dateien aus dem Internet – das ist
+bei selbst gebauten PyInstaller-Programmen normal.
 
 ### Aus dem Quellcode starten (Windows/Mac/Linux)
 
