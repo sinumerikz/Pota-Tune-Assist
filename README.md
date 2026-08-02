@@ -51,6 +51,8 @@ QRZ-Upload – alles in einer Oberfläche.
   QRZ.com-XML-Lookup (eigenes, kostenpflichtiges QRZ-Abo nötig); erscheint
   nur, wenn QRZ-Zugangsdaten + eigener Locator in den Settings hinterlegt
   sind, sonst komplett ausgeblendet und keine Abfragen.
+- **Sonnendaten (SFI/K/A/MUF)** – Badge oben rechts, alle 15 Minuten
+  aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
   beim FT-710-CAT-Backend), hilfreich bei Frequenz-/Mode-Problemen.
 - **Zuverlässige CAT-Kommunikation** – Frequenz- und Mode-Befehle werden bei
@@ -146,10 +148,11 @@ Commit-SHA direkt in den Quellcode (`APP_BUILD_VERSION`), bevor er die
 .exe baut – die Versionsnummer steckt also **in der .exe selbst**, nicht
 in einer separaten Datei daneben, die z. B. durch einen manuellen
 Download nur der .exe (ohne den Rest des Repos) veraltet zurückbleiben
-könnte. Die App vergleicht ihre eigene eingebaute Version beim Start mit
-der aktuellen `VERSION`-Datei auf `main`. Weicht sie ab, lädt die App die
-neue .exe im Hintergrund automatisch herunter (blockiert die Oberfläche
-nicht) und prüft sie gegen die vom Workflow mitcommittete
+könnte. Die App vergleicht ihre eigene eingebaute Version beim Start **und
+danach stündlich im Hintergrund** mit der aktuellen `VERSION`-Datei auf
+`main`. Weicht sie ab, lädt die App die neue .exe im Hintergrund
+automatisch herunter (blockiert die Oberfläche nicht) und prüft sie gegen
+die vom Workflow mitcommittete
 `POTA-Tune-Assist.exe.sha256`-Prüfsumme – ein unvollständiger/beschädigter
 Download wird verworfen statt eingesetzt. Sobald der Download verifiziert
 ist, erscheint der grüne Button **"🔄 Update installieren"** neben
@@ -384,6 +387,19 @@ steht in der Spalte **HEUTE**:
 
 Der Abgleich erfolgt pro Rufzeichen unabhängig vom aktuellen Spot – auch ein
 Re-Spot derselben Station (neue Spot-ID) wird korrekt erkannt.
+
+## Sonnendaten (SFI/K/A/MUF)
+
+Oben rechts neben der Spot-Anzahl zeigt ein Badge die aktuellen
+Ausbreitungs-Indizes: **SFI** (Solar Flux Index), **K**-Index, **A**-Index
+sowie **MUF** – abgerufen von N0NBHs kostenlosem, in der Amateurfunk-Szene
+etablierten Solar-Daten-Feed (`hamqsl.com`), alle 15 Minuten neu geladen,
+kein API-Key nötig. Der MUF-Wert ist der allgemeine MUF(3000km)-Wert
+dieses Feeds (bezogen auf dessen Referenzstation) – **keine speziell für
+Deutschland berechnete MUF**, dafür bräuchte es Ionosonden-Daten (z. B.
+von der Station Juliusruh), die nicht als einfache kostenlose API
+verfügbar sind. Schlägt der Abruf fehl (kein Internet, Feed nicht
+erreichbar), bleibt das Badge einfach bei "--" stehen, ohne Fehlermeldung.
 
 ## Mode-Zuordnung für QSY
 

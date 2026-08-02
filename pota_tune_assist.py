@@ -71,6 +71,14 @@ POTA_POLL_SECONDS_DEFAULT = 60
 WORKED_TODAY_REFRESH_SECONDS = 60
 QRZ_LOGBOOK_API_URL = "https://logbook.qrz.com/api"
 
+# Solar/propagation indices (N0NBH's widely-used ham radio solar data feed,
+# free, no API key). SFI/K/A are global indices; MUF is the feed's single
+# MUF(3000km) figure from its reference station, not specifically Germany -
+# there's no simple free API for a Germany-only MUF (that needs ionosonde
+# data, e.g. the Juliusruh station), so this is the closest practical stand-in.
+SOLAR_DATA_URL = "https://www.hamqsl.com/solarxml.php"
+SOLAR_POLL_SECONDS = 15 * 60
+
 
 def app_dir() -> Path:
     """Directory the script/exe lives in - config and logs live next to it."""
@@ -104,6 +112,7 @@ VERSION_CHECK_URL = f"{GITHUB_RAW_BASE}/VERSION"
 EXE_DOWNLOAD_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe"
 EXE_CHECKSUM_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe.sha256"
 EXE_NAME = "POTA-Tune-Assist.exe"
+UPDATE_CHECK_INTERVAL_SECONDS = 60 * 60
 
 ADIF_HEADER = (
     "POTA Tune Assist ADIF Log\n"
@@ -978,6 +987,32 @@ def fetch_pota_spots() -> list[Spot]:
     return spots
 
 
+def fetch_solar_data() -> dict[str, str] | None:
+    """SFI/K/A/MUF from N0NBH's solar-terrestrial XML feed. Returns None
+    on any network/parse failure - never raises, this is a nice-to-have
+    display, not something that should ever interrupt the app."""
+    try:
+        resp = requests.get(SOLAR_DATA_URL, timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.text)
+    except (requests.RequestException, ET.ParseError):
+        return None
+    solardata = root.find(".//solardata")
+    if solardata is None:
+        return None
+
+    def get(tag: str) -> str:
+        value = solardata.findtext(tag)
+        return value.strip() if value and value.strip() else "?"
+
+    return {
+        "sfi": get("solarflux"),
+        "k": get("kindex"),
+        "a": get("aindex"),
+        "muf": get("muf"),
+    }
+
+
 def grid_to_latlon(grid: str) -> tuple[float, float] | None:
     """Center coordinates of a Maidenhead grid square (4 or 6+ chars) -
     used to place "Eig. Locator" on the map for the distance column."""
@@ -1307,6 +1342,8 @@ class App(tk.Tk):
         self.clock_var = tk.StringVar(value="--:--:--z")
         self.cat_badge_var = tk.StringVar(value="CAT")
         self.count_badge_var = tk.StringVar(value="0 Spots")
+        self.solar_data_var = tk.StringVar(value="SFI -- · K -- · A -- · MUF -- MHz")
+        self.solar_result_queue: queue.Queue = queue.Queue()
         self.status_var = tk.StringVar(value="Bereit.")
         self.conn_status_var = tk.StringVar(value="Nicht verbunden")
 
@@ -1316,8 +1353,8 @@ class App(tk.Tk):
         threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
         for _ in range(LOCATOR_WORKER_COUNT):
             threading.Thread(target=self._locator_worker, daemon=True).start()
-        if getattr(sys, "frozen", False) and sys.platform == "win32":
-            threading.Thread(target=self._check_for_update_async, daemon=True).start()
+        self._tick_update_check()
+        self._tick_solar_data()
         self.after(200, self._tick)
         self._tick_clock()
         self._refresh_worked_today()
@@ -1364,6 +1401,9 @@ class App(tk.Tk):
         self.cat_badge = _badge(title_row, textvariable=self.cat_badge_var, fg="white", bg=COL_RED)
         self.cat_badge.pack(side="right", padx=6)
         _badge(title_row, textvariable=self.count_badge_var, fg=COL_TEXT, bg=COL_PANEL_ALT).pack(side="right", padx=6)
+        _badge(
+            title_row, textvariable=self.solar_data_var, fg=COL_AMBER, bg=COL_PANEL_ALT,
+        ).pack(side="right", padx=6)
 
         filter_row = tk.Frame(header, bg=COL_BG)
         filter_row.pack(fill="x", pady=(8, 0))
@@ -2071,6 +2111,15 @@ class App(tk.Tk):
         self._refresh_worked_today()
         self.after(WORKED_TODAY_REFRESH_SECONDS * 1000, self._tick_worked_today)
 
+    def _fetch_solar_data_async(self) -> None:
+        data = fetch_solar_data()
+        if data:
+            self.solar_result_queue.put(data)
+
+    def _tick_solar_data(self) -> None:
+        threading.Thread(target=self._fetch_solar_data_async, daemon=True).start()
+        self.after(SOLAR_POLL_SECONDS * 1000, self._tick_solar_data)
+
     def _country_filter_label(self) -> str:
         n = len(self.selected_countries)
         if n == 0:
@@ -2232,6 +2281,15 @@ class App(tk.Tk):
             self.locator_work_queue.task_done()
 
     # -- self-update ---------------------------------------------------------------
+
+    def _tick_update_check(self) -> None:
+        if (
+            getattr(sys, "frozen", False)
+            and sys.platform == "win32"
+            and not self.pending_update_version
+        ):
+            threading.Thread(target=self._check_for_update_async, daemon=True).start()
+        self.after(UPDATE_CHECK_INTERVAL_SECONDS * 1000, self._tick_update_check)
 
     def _check_for_update_async(self) -> None:
         if APP_BUILD_VERSION == "dev":
@@ -2739,6 +2797,15 @@ class App(tk.Tk):
                     self._log(f"Update-Check: {payload} - lade im Hintergrund herunter...")
                 else:
                     self._log(f"Update-Check fehlgeschlagen: {payload}")
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
+                data = self.solar_result_queue.get_nowait()
+                self.solar_data_var.set(
+                    f"SFI {data['sfi']} · K {data['k']} · A {data['a']} · MUF {data['muf']} MHz"
+                )
         except queue.Empty:
             pass
 
