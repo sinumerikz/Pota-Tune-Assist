@@ -527,7 +527,13 @@ class RigctldClient:
     def get_freq_hz(self) -> int:
         for line in self._transact("f"):
             if line.startswith("Frequency:"):
-                return int(line.split(":", 1)[1].strip())
+                # int() alone chokes on a decimal-formatted reply (e.g.
+                # "14074000.000000", which some rig backends return) -
+                # float() first accepts both that and a plain integer.
+                try:
+                    return int(float(line.split(":", 1)[1].strip()))
+                except ValueError as exc:
+                    raise CatError(f"Ungültige Frequenz in rigctld-Antwort: {line!r}") from exc
         raise CatError("Keine Frequenz in rigctld-Antwort")
 
     def set_freq_hz(self, hz: int) -> None:
@@ -746,13 +752,32 @@ class TuneController:
         if not self.active:
             return
         self.active = False
-        self.cat.key_up()
+        # Each restore step runs even if an earlier one fails - e.g. a
+        # rig backend that rejects the RFPOWER restore must not also skip
+        # un-keying PTT or restoring frequency/mode. Failures are collected
+        # and raised together at the end so the caller still finds out.
+        errors: list[str] = []
+        try:
+            self.cat.key_up()
+        except CatError as exc:
+            errors.append(str(exc))
         if self.saved_mode is not None:
-            set_verified(self.cat.get_mode, self.cat.set_mode, self.saved_mode)
+            try:
+                set_verified(self.cat.get_mode, self.cat.set_mode, self.saved_mode)
+            except CatError as exc:
+                errors.append(str(exc))
         if self.saved_freq is not None:
-            set_verified(self.cat.get_freq_hz, self.cat.set_freq_hz, self.saved_freq)
+            try:
+                set_verified(self.cat.get_freq_hz, self.cat.set_freq_hz, self.saved_freq)
+            except CatError as exc:
+                errors.append(str(exc))
         if self.saved_power is not None:
-            self.cat.set_power(self.saved_power)
+            try:
+                self.cat.set_power(self.saved_power)
+            except CatError as exc:
+                errors.append(str(exc))
+        if errors:
+            raise CatError("; ".join(errors))
 
     def elapsed(self) -> float:
         return time.monotonic() - self.start_time if self.active else 0.0
@@ -996,9 +1021,15 @@ class App(tk.Tk):
         self.power_unit_var = tk.StringVar(value="Leistung (W)")
         self.offset_var = tk.IntVar(value=TUNE_OFFSET_HZ_DEFAULT)
         self.offset_sign_var = tk.StringVar(value="above")
-        self.band_filter_var = tk.StringVar(value=BAND_FILTER_OPTIONS[0])
-        self.mode_filter_var = tk.StringVar(value=MODE_FILTER_OPTIONS[0])
-        self.age_filter_var = tk.StringVar(value=AGE_FILTER_OPTIONS[0])
+        saved_band = config.get("band_filter", BAND_FILTER_OPTIONS[0])
+        saved_mode = config.get("mode_filter", MODE_FILTER_OPTIONS[0])
+        saved_age = config.get("age_filter", AGE_FILTER_OPTIONS[0])
+        self.band_filter_var = tk.StringVar(
+            value=saved_band if saved_band in BAND_FILTER_OPTIONS else BAND_FILTER_OPTIONS[0])
+        self.mode_filter_var = tk.StringVar(
+            value=saved_mode if saved_mode in MODE_FILTER_OPTIONS else MODE_FILTER_OPTIONS[0])
+        self.age_filter_var = tk.StringVar(
+            value=saved_age if saved_age in AGE_FILTER_OPTIONS else AGE_FILTER_OPTIONS[0])
         self.sort_column: str | None = None
         self.sort_reverse: bool = False
         self.selected_countries: set[str] = set(config.get("hunt_countries", []))
@@ -1071,21 +1102,21 @@ class App(tk.Tk):
         band_combo = ttk.Combobox(filter_row, textvariable=self.band_filter_var, style="Dark.TCombobox",
                                    values=BAND_FILTER_OPTIONS, width=10, state="readonly")
         band_combo.pack(side="left", padx=(0, 10))
-        band_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_spots())
+        band_combo.bind("<<ComboboxSelected>>", lambda *_: self._on_filter_setting_changed())
 
         tk.Label(filter_row, text="Mode", fg=COL_MUTED, bg=COL_BG,
                  font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
         mode_combo = ttk.Combobox(filter_row, textvariable=self.mode_filter_var, style="Dark.TCombobox",
                                    values=MODE_FILTER_OPTIONS, width=10, state="readonly")
         mode_combo.pack(side="left", padx=(0, 10))
-        mode_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_spots())
+        mode_combo.bind("<<ComboboxSelected>>", lambda *_: self._on_filter_setting_changed())
 
         tk.Label(filter_row, text="Alter", fg=COL_MUTED, bg=COL_BG,
                  font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
         age_combo = ttk.Combobox(filter_row, textvariable=self.age_filter_var, style="Dark.TCombobox",
                                   values=AGE_FILTER_OPTIONS, width=8, state="readonly")
         age_combo.pack(side="left", padx=(0, 10))
-        age_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_spots())
+        age_combo.bind("<<ComboboxSelected>>", lambda *_: self._on_filter_setting_changed())
 
         tk.Label(filter_row, text="Land", fg=COL_MUTED, bg=COL_BG,
                  font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
@@ -1685,6 +1716,14 @@ class App(tk.Tk):
 
     # -- table rendering ----------------------------------------------------------
 
+    def _on_filter_setting_changed(self) -> None:
+        config = load_config()
+        config["band_filter"] = self.band_filter_var.get()
+        config["mode_filter"] = self.mode_filter_var.get()
+        config["age_filter"] = self.age_filter_var.get()
+        save_config(config)
+        self._render_spots()
+
     def _spot_passes_filters(self, spot: Spot) -> bool:
         if spot.spot_id in self.skipped_ids:
             return False
@@ -2143,7 +2182,9 @@ class App(tk.Tk):
         sign = -1 if self.offset_sign_var.get() == "below" else 1
         try:
             self.tune.start(self.tune_power_var.get(), sign, self.offset_var.get())
-        except CatError as exc:
+        except Exception as exc:  # noqa: BLE001 - a Tk callback exception is otherwise
+            # invisible in a --windowed build (no console for the traceback), so
+            # anything going wrong here must be caught and shown, not just CatError.
             self._log(f"Tune abgebrochen: {exc}")
             return
         self.tune_btn.configure(text="● ON AIR", bg=COL_RED, fg="white")
@@ -2159,11 +2200,15 @@ class App(tk.Tk):
         if not self.tune.active:
             return
         target_freq = self.tune.saved_freq
-        self.tune.stop()
-        self.tune_btn.configure(text="TUNE (halten)", bg=COL_AMBER, fg="#1a1200")
+        try:
+            self.tune.stop()
+        except Exception as exc:  # noqa: BLE001 - see _on_tune_press
+            self._log(f"Fehler beim Beenden von TUNE: {exc}")
+        finally:
+            self.tune_btn.configure(text="TUNE (halten)", bg=COL_AMBER, fg="#1a1200")
         try:
             confirmed_freq = self.cat.get_freq_hz()
-        except CatError:
+        except Exception:  # noqa: BLE001
             confirmed_freq = None
         if confirmed_freq is not None and target_freq is not None:
             self._log(

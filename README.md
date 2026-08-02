@@ -39,8 +39,9 @@ QRZ-Upload – alles in einer Oberfläche.
 - **Filter** – Band-, Mode- (Alle/CW/SSB/**CW & SSB**/Digital) und
   Alters-Dropdown (Alle/5/10/15 min blendet ältere Spots aus), Freitext-
   Suchfeld sowie ein Mehrfachauswahl-Dialog für Länder (mit Kontinent-
-  Schnellwahl EU/NA/SA/AS/AF/OC); die Länderauswahl bleibt über Neustarts
-  hinweg erhalten. "Skip" blendet einzelne Spots aus,
+  Schnellwahl EU/NA/SA/AS/AF/OC). Band, Mode, Alter und Länderauswahl
+  bleiben über Neustarts hinweg erhalten (nur das Suchfeld nicht, das
+  ist bei jedem Start wieder leer). "Skip" blendet einzelne Spots aus,
   "Alle anzeigen" setzt das zurück.
 - **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, HEUTE,
   FREQ, MODE, REF, NAME, LOC, AGE) sortiert danach, erneuter Klick dreht
@@ -100,6 +101,13 @@ In den **Settings** lässt sich zwischen zwei Backends wählen:
   `RFPOWER`-Stufe (0.0–1.0 = Anteil der Maximalleistung). Das Feld
   beschriftet sich beim Umschalten entsprechend um ("Power Level (0–1)"
   statt "Leistung (W)").
+
+  **Reagiert TUNE über rigctld nicht:** Nicht jeder Hamlib-Rig-Backend
+  unterstützt PTT (`T`-Kommando) oder das RFPOWER-Level – wird das vom
+  gewählten Rig-Modell nicht unterstützt, meldet rigctld einen Fehler.
+  Das erscheint jetzt immer als Klartext in der Statuszeile unten
+  ("Tune abgebrochen: ..."), auch bei unerwarteten Fehlern – vorher konnte
+  das in der `--windowed`-.exe ohne jede Rückmeldung fehlschlagen.
 
 Oberfläche im dunklen, militärisch angehauchten Olivgrün-Theme (Filter-Chips,
 Statusbadges, farbcodierte Tabelle nach Betriebsart, rot durchgestrichene
