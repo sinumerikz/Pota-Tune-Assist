@@ -77,6 +77,7 @@ def app_dir() -> Path:
 
 CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
 LOG_DIR = app_dir() / "logs"
+OUTDOOR_LIST_PATH = app_dir() / "draussenfunker.txt"
 
 ADIF_HEADER = (
     "POTA Tune Assist ADIF Log\n"
@@ -100,6 +101,27 @@ def save_config(config: dict) -> None:
             json.dump(config, f, indent=2)
     except OSError:
         pass
+
+
+def load_outdoor_calls() -> set[str]:
+    """Reads the user-maintained "Draussenfunker" watchlist: one callsign
+    per line, '#' starts a comment, everything after the first whitespace
+    on a line is ignored so trailing notes don't break parsing. Missing
+    file is not an error - just means an empty list."""
+    try:
+        with open(OUTDOOR_LIST_PATH, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+    except OSError:
+        return set()
+    calls: set[str] = set()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        call = line.split()[0].strip().upper()
+        if call:
+            calls.add(call)
+    return calls
 
 
 def _adif_field(name: str, value: str) -> str:
@@ -862,6 +884,7 @@ COL_GREEN = "#4caf50"
 COL_RED = "#a1372c"
 COL_AMBER = "#b58c2b"
 COL_FAVORITE_BG = "#4a3a0d"
+COL_OUTDOOR_BG = "#0d3a4a"
 
 
 def _chip_button(parent, text, command=None, **kw):
@@ -910,6 +933,7 @@ class App(tk.Tk):
         self.my_grid_var = tk.StringVar(value=config.get("my_gridsquare", ""))
         self.qrz_api_key_var = tk.StringVar(value=config.get("qrz_api_key", ""))
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
+        self.outdoor_calls: set[str] = load_outdoor_calls()
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.IntVar(value=CAT_BAUD_DEFAULT)
@@ -1025,19 +1049,19 @@ class App(tk.Tk):
         table_frame = tk.Frame(self, bg=COL_BG)
         table_frame.pack(fill="both", expand=True, padx=12, pady=6)
 
-        columns = ("fav", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc", "age", "skip", "log")
+        columns = ("fav", "outdoor", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc", "age", "skip", "log")
         headers = {
-            "fav": "", "qsy": "", "call": "CALLSIGN", "worked": "HEUTE", "freq": "FREQ (KHZ)", "mode": "MODE",
-            "ref": "REF", "name": "NAME", "loc": "LOC", "age": "AGE", "skip": "", "log": "",
+            "fav": "", "outdoor": "", "qsy": "", "call": "CALLSIGN", "worked": "HEUTE", "freq": "FREQ (KHZ)",
+            "mode": "MODE", "ref": "REF", "name": "NAME", "loc": "LOC", "age": "AGE", "skip": "", "log": "",
         }
         widths = {
-            "fav": 30, "qsy": 60, "call": 90, "worked": 220, "freq": 90, "mode": 70,
+            "fav": 30, "outdoor": 30, "qsy": 60, "call": 90, "worked": 220, "freq": 90, "mode": 70,
             "ref": 90, "name": 260, "loc": 70, "age": 60, "skip": 60, "log": 70,
         }
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
         for col in columns:
             self.tree.heading(col, text=headers[col])
-            anchor = "center" if col in ("fav", "qsy", "skip", "mode", "age", "loc") else "w"
+            anchor = "center" if col in ("fav", "outdoor", "qsy", "skip", "mode", "age", "loc") else "w"
             self.tree.column(col, width=widths[col], anchor=anchor)
 
         vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview,
@@ -1054,10 +1078,13 @@ class App(tk.Tk):
         self.tree.tag_configure("digital_odd", background=COL_ROW_ODD, foreground=COL_AMBER)
         self.tree.tag_configure("invalid", background=COL_ROW_EVEN, foreground=COL_RED)
         self.tree.tag_configure("logged", background=COL_ROW_EVEN, foreground=COL_ACCENT_DIM)
-        # Listed after the mode/invalid/logged tags on favorite rows so its
-        # background wins while the other tag's foreground (mode color,
-        # red for invalid, ...) still shows through - only background+font
-        # are set here, on purpose.
+        # Listed after the mode/invalid/logged tags on favorite/outdoor rows
+        # so their background wins while the other tag's foreground (mode
+        # color, red for invalid, ...) still shows through - only
+        # background+font are set here, on purpose. "favorite" is applied
+        # after "outdoor" in _render_spots() so a row that is both wins
+        # the gold favorite look.
+        self.tree.tag_configure("outdoor", background=COL_OUTDOOR_BG, font=("Segoe UI", 10, "bold"))
         self.tree.tag_configure("favorite", background=COL_FAVORITE_BG, font=("Segoe UI", 10, "bold"))
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
@@ -1584,10 +1611,13 @@ class App(tk.Tk):
     def _is_favorite(self, spot: Spot) -> bool:
         return (spot.activator or "").strip().upper() in self.favorite_calls
 
+    def _is_outdoor(self, spot: Spot) -> bool:
+        return (spot.activator or "").strip().upper() in self.outdoor_calls
+
     def _render_spots(self) -> None:
         self.tree.delete(*self.tree.get_children())
         visible = [s for s in self.spots if self._spot_passes_filters(s)]
-        visible.sort(key=lambda s: not self._is_favorite(s))
+        visible.sort(key=lambda s: (not self._is_favorite(s), not self._is_outdoor(s)))
         for i, spot in enumerate(visible):
             category = mode_category(spot.mode)
             parity = "even" if i % 2 == 0 else "odd"
@@ -1616,11 +1646,18 @@ class App(tk.Tk):
                 worked_text = ""
 
             is_fav = self._is_favorite(spot)
+            is_outdoor = self._is_outdoor(spot)
             fav_icon = "⭐" if is_fav else "☆"
-            tags = (tag, "favorite") if is_fav else (tag,)
+            outdoor_icon = "🏕" if is_outdoor else ""
+            tags = (tag,)
+            if is_outdoor:
+                tags += ("outdoor",)
+            if is_fav:
+                tags += ("favorite",)
 
             self.tree.insert("", "end", iid=str(spot.spot_id), tags=tags, values=(
                 fav_icon,
+                outdoor_icon,
                 "▶ QSY",
                 call,
                 worked_text,
@@ -1642,12 +1679,12 @@ class App(tk.Tk):
             return
         if col_id == "#1":
             self._toggle_favorite(int(row_id))
-        elif col_id == "#2":
+        elif col_id == "#3":
             self._qsy_to_spot_id(int(row_id))
-        elif col_id == "#11":
+        elif col_id == "#12":
             self.skipped_ids.add(int(row_id))
             self._render_spots()
-        elif col_id == "#12":
+        elif col_id == "#13":
             self._open_log_dialog_for_spot_id(int(row_id))
 
     def _on_tree_double_click(self, event) -> None:

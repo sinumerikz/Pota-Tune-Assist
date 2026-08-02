@@ -1,0 +1,10 @@
+# Draussenfunker-Liste fuer POTA Tune Assist
+#
+# Ein Rufzeichen pro Zeile. Gross-/Kleinschreibung ist egal.
+# Zeilen, die mit '#' beginnen, sind Kommentare und werden ignoriert.
+# Alles nach dem ersten Leerzeichen in einer Zeile wird ignoriert -
+# dort kann z. B. ein Name oder eine Notiz stehen.
+#
+# Beispiel:
+# DL2MBN
+# OE1ABC   Hans, aktiviert oft im Schwarzwald

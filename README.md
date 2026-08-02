@@ -144,12 +144,43 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    gemerkt (`pota_tune_assist_config.json`) und ihre Spots erscheinen immer ganz
    oben in der Liste, egal wie sortiert/gefiltert wird. Favoriten-Zeilen
    bekommen zusätzlich einen eigenen goldbraunen Zeilenhintergrund plus
-   fette Schrift statt der normalen Mode-Farbcodierung.
+   fette Schrift statt der normalen Mode-Farbcodierung. Die **🏕-Spalte**
+   links daneben markiert Rufzeichen aus der Draußenfunker-Liste (siehe
+   unten) mit eigenem blaugrünem Zeilenhintergrund – auch diese Spots
+   erscheinen ganz oben (nach den Favoriten).
 4. **TUNE (halten)**-Knopf gedrückt halten → Versatz (siehe unten), CW, 5 W,
    Dauerton. Loslassen → zurück auf die vorherige Frequenz/Mode/Leistung.
    Ein 10-Sekunden-Sicherheits-Timeout schaltet automatisch ab.
 5. Versatzrichtung (oberhalb/unterhalb) und Leistung stehen direkt in der
    Tune-Leiste am unteren Fensterrand.
+
+## Draußenfunker-Liste
+
+Eigene Rufzeichen-Liste (z. B. befreundete Aktivierende), die beim
+**Programmstart** einmal aus der Textdatei `draussenfunker.txt` (liegt
+neben dem Programm bzw. der .exe) eingelesen wird – ein Rufzeichen pro
+Zeile, Groß-/Kleinschreibung egal:
+
+```
+# Zeilen mit # sind Kommentare, Leerzeilen werden ignoriert
+DL2MBN
+OE1ABC   Hans, aktiviert oft im Schwarzwald
+DL3XYZ
+```
+
+Text nach dem ersten Leerzeichen in einer Zeile wird ignoriert – dort kann
+also z. B. der Name oder eine Notiz stehen. Existiert die Datei nicht, ist
+die Liste einfach leer, es gibt keine Fehlermeldung.
+
+Taucht ein Spot mit einem Rufzeichen aus dieser Liste auf, bekommt die
+Zeile in der Tabelle die **🏕-Markierung** in der Spalte links neben
+"▶ QSY" sowie einen eigenen blaugrünen Zeilenhintergrund (zur
+Unterscheidung von den goldenen ⭐-Favoriten) und wird – wie Favoriten –
+automatisch nach oben in der Liste einsortiert (Favoriten zuerst, danach
+Draußenfunker-Treffer, danach der Rest). Anders als die Favoriten ist die
+Liste nicht in der App editierbar, sondern wird ausschließlich über die
+Textdatei gepflegt; Änderungen daran wirken erst nach einem Neustart der
+App.
 
 ## TUNE-Versatz: automatisch nach Modus-Bandbreite
 
