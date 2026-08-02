@@ -326,6 +326,10 @@ RIGCTLD_PORT_DEFAULT = 4532
 RIGCTLD_TIMEOUT = 1.0
 RIGCTLD_LAUNCH_TIMEOUT = 5.0
 
+CAT_HEALTH_CHECK_SECONDS = 15
+RECONNECT_BACKOFF_INITIAL_SECONDS = 5
+RECONNECT_BACKOFF_MAX_SECONDS = 60
+
 TUNE_POWER_WATTS_DEFAULT = 5
 RIGCTLD_TUNE_LEVEL_DEFAULT = 0.05
 TUNE_OFFSET_HZ_DEFAULT = 5000
@@ -1257,10 +1261,12 @@ class App(tk.Tk):
         self.outdoor_result_queue: queue.Queue = queue.Queue()
         self.stop_poll_event = threading.Event()
 
-        self.backend_var = tk.StringVar(value="ft710")
-        self.backend_display_var = tk.StringVar(value=BACKEND_KEY_TO_DISPLAY["ft710"])
-
         config = load_config()
+        self.backend_var = tk.StringVar(value=config.get("backend", "ft710"))
+        self.backend_display_var = tk.StringVar(
+            value=BACKEND_KEY_TO_DISPLAY.get(self.backend_var.get(), BACKEND_KEY_TO_DISPLAY["ft710"])
+        )
+
         self.my_callsign_var = tk.StringVar(value=config.get("my_callsign", ""))
         self.my_grid_var = tk.StringVar(value=config.get("my_gridsquare", ""))
         self.qrz_api_key_var = tk.StringVar(value=config.get("qrz_api_key", ""))
@@ -1278,11 +1284,15 @@ class App(tk.Tk):
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
         self.outdoor_calls: set[str] = set()
 
-        self.port_var = tk.StringVar()
-        self.baud_var = tk.IntVar(value=CAT_BAUD_DEFAULT)
-        self.host_var = tk.StringVar(value=RIGCTLD_HOST_DEFAULT)
-        self.rig_port_var = tk.IntVar(value=RIGCTLD_PORT_DEFAULT)
+        self.port_var = tk.StringVar(value=config.get("cat_port", ""))
+        self.baud_var = tk.IntVar(value=config.get("cat_baud", CAT_BAUD_DEFAULT))
+        self.host_var = tk.StringVar(value=config.get("rigctld_host", RIGCTLD_HOST_DEFAULT))
+        self.rig_port_var = tk.IntVar(value=config.get("rigctld_port", RIGCTLD_PORT_DEFAULT))
         self.rigctld_process = RigctldProcess()
+        self.connect_result_queue: queue.Queue = queue.Queue()
+        self._manual_disconnect = False
+        self.reconnect_backoff_seconds = RECONNECT_BACKOFF_INITIAL_SECONDS
+        self._next_reconnect_attempt_at = 0.0
         self.rig_models: list[tuple[int, str, str]] = []
         self.rig_model_displays: list[str] = []
         self.rig_model_display_var = tk.StringVar(value=config.get("rig_model_display", ""))
@@ -1318,6 +1328,7 @@ class App(tk.Tk):
 
         self._build_ui()
         self._refresh_ports()
+        self._tick_cat_health()
         self._start_poll_thread()
         threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
         for _ in range(LOCATOR_WORKER_COUNT):
@@ -1850,6 +1861,7 @@ class App(tk.Tk):
 
     def _toggle_connect(self) -> None:
         if self.cat.connected:
+            self._manual_disconnect = True
             if self.tune.active:
                 self.tune.stop()
             self.cat.disconnect()
@@ -1862,6 +1874,23 @@ class App(tk.Tk):
             self._log("Getrennt.")
             return
 
+        try:
+            cat, status, log_lines = self._connect_cat()
+        except (CatError, OSError, serial.SerialException) as exc:
+            messagebox.showerror("Verbindungsfehler", str(exc))
+            return
+        self._apply_connected_cat(cat, status, log_lines)
+
+    def _connect_cat(self):
+        """Core connect logic - reads settings StringVars (safe from any
+        thread) but never touches Tkinter widgets and never shows a
+        messagebox, so it's shared by the Verbinden button (main thread,
+        caller shows errors via messagebox), startup auto-connect, and
+        auto-reconnect after a dropped connection (both background
+        threads, caller routes errors through log_result_queue instead).
+        Returns (cat_client, status_message, log_lines) or raises
+        CatError/OSError/serial.SerialException."""
+        log_lines: list[str] = []
         if self.backend_var.get() == "rigctld":
             host = self.host_var.get().strip() or RIGCTLD_HOST_DEFAULT
             managed = host.lower() in ("localhost", "127.0.0.1")
@@ -1871,31 +1900,20 @@ class App(tk.Tk):
                 display = self.rig_model_display_var.get().strip()
                 model_id = self._rig_model_id_from_display(display)
                 if model_id is None:
-                    messagebox.showerror(
-                        "Fehler", "Bitte ein Rig-Modell auswählen (ggf. erst über ↻ laden).",
-                    )
-                    return
+                    raise CatError("Bitte ein Rig-Modell auswählen (ggf. erst über ↻ laden).")
                 serial_port = self.port_var.get()
                 if not serial_port:
-                    messagebox.showerror("Fehler", "Bitte den CAT-Port des Funkgeräts auswählen.")
-                    return
+                    raise CatError("Bitte den CAT-Port des Funkgeräts auswählen.")
                 exe = find_rigctld_executable(self.rigctld_path_var.get())
                 if not exe:
-                    messagebox.showerror(
-                        "rigctld nicht gefunden",
-                        "Hamlib ist nicht installiert, rigctld nicht im PATH und kein\n"
-                        "rigctld-Pfad in den Settings eingetragen.\n"
-                        "Siehe https://hamlib.github.io/",
+                    raise CatError(
+                        "Hamlib ist nicht installiert, rigctld nicht im PATH und kein "
+                        "rigctld-Pfad in den Settings eingetragen. Siehe https://hamlib.github.io/"
                     )
-                    return
-                try:
-                    self.rigctld_process.start(
-                        exe, model_id, serial_port, self.baud_var.get(), "127.0.0.1", rig_port,
-                    )
-                except CatError as exc:
-                    messagebox.showerror("rigctld-Fehler", str(exc))
-                    return
-                self._log(f"rigctld gestartet (Modell {model_id}, {serial_port}, Port {rig_port}).")
+                self.rigctld_process.start(
+                    exe, model_id, serial_port, self.baud_var.get(), "127.0.0.1", rig_port,
+                )
+                log_lines.append(f"rigctld gestartet (Modell {model_id}, {serial_port}, Port {rig_port}).")
                 connect_host = "127.0.0.1"
             else:
                 connect_host = host
@@ -1903,35 +1921,80 @@ class App(tk.Tk):
             cat = RigctldClient()
             try:
                 cat.connect(connect_host, rig_port)
-            except (OSError, CatError) as exc:
+            except (OSError, CatError):
                 if managed:
                     self.rigctld_process.stop()
-                messagebox.showerror("Verbindungsfehler", str(exc))
-                return
-            self.cat = cat
-            self.tune.cat = cat
-            self.conn_status_var.set(f"Verbunden (rigctld {connect_host}:{rig_port})")
-            self._log(f"Verbunden mit rigctld auf {connect_host}:{rig_port}.")
+                raise
             if managed:
                 self._save_rig_model(self.rig_model_display_var.get().strip(), model_id)
-        else:
-            port = self.port_var.get()
-            if not port:
-                messagebox.showerror("Fehler", "Bitte einen Port auswählen.")
-                return
-            cat = Ft710Cat()
-            try:
-                cat.connect(port, self.baud_var.get())
-            except (serial.SerialException, CatError) as exc:
-                messagebox.showerror("Verbindungsfehler", str(exc))
-                return
-            self.cat = cat
-            self.tune.cat = cat
-            self.conn_status_var.set(f"Verbunden ({port}, Freq.-Breite {cat.freq_width})")
-            self._log(f"Verbunden mit {port}.")
+            status = f"Verbunden (rigctld {connect_host}:{rig_port})"
+            log_lines.append(f"Verbunden mit rigctld auf {connect_host}:{rig_port}.")
+            return cat, status, log_lines
 
+        port = self.port_var.get()
+        if not port:
+            raise CatError("Bitte einen Port auswählen.")
+        cat = Ft710Cat()
+        cat.connect(port, self.baud_var.get())
+        status = f"Verbunden ({port}, Freq.-Breite {cat.freq_width})"
+        log_lines.append(f"Verbunden mit {port}.")
+        return cat, status, log_lines
+
+    def _apply_connected_cat(self, cat, status: str, log_lines: list[str]) -> None:
+        self.cat = cat
+        self.tune.cat = cat
+        self.conn_status_var.set(status)
+        for line in log_lines:
+            self._log(line)
         self.connect_btn.configure(text="Trennen")
         self.cat_badge.configure(bg=COL_GREEN)
+        self._save_connection_settings()
+        self.reconnect_backoff_seconds = RECONNECT_BACKOFF_INITIAL_SECONDS
+        self._next_reconnect_attempt_at = 0.0
+        self._manual_disconnect = False
+
+    def _has_saved_connection_settings(self) -> bool:
+        if self.backend_var.get() == "rigctld":
+            return bool(self.host_var.get().strip())
+        return bool(self.port_var.get().strip())
+
+    def _tick_cat_health(self) -> None:
+        threading.Thread(target=self._cat_health_check_async, daemon=True).start()
+        self.after(CAT_HEALTH_CHECK_SECONDS * 1000, self._tick_cat_health)
+
+    def _cat_health_check_async(self) -> None:
+        if self.cat.connected:
+            try:
+                self.cat.get_freq_hz()
+            except CatError:
+                self.connect_result_queue.put(("lost", None, None, None))
+            return
+        if self._manual_disconnect or not self._has_saved_connection_settings():
+            return
+        if time.monotonic() < self._next_reconnect_attempt_at:
+            return
+        try:
+            cat, status, log_lines = self._connect_cat()
+        except (CatError, OSError, serial.SerialException) as exc:
+            self.reconnect_backoff_seconds = min(
+                self.reconnect_backoff_seconds * 2, RECONNECT_BACKOFF_MAX_SECONDS,
+            )
+            self._next_reconnect_attempt_at = time.monotonic() + self.reconnect_backoff_seconds
+            self.log_result_queue.put(
+                f"Auto-Reconnect fehlgeschlagen (nächster Versuch in "
+                f"{self.reconnect_backoff_seconds}s): {exc}"
+            )
+            return
+        self.connect_result_queue.put(("ok", cat, status, log_lines))
+
+    def _save_connection_settings(self) -> None:
+        config = load_config()
+        config["backend"] = self.backend_var.get()
+        config["cat_port"] = self.port_var.get()
+        config["cat_baud"] = self.baud_var.get()
+        config["rigctld_host"] = self.host_var.get().strip()
+        config["rigctld_port"] = self.rig_port_var.get()
+        save_config(config)
 
     # -- POTA polling -----------------------------------------------------------
 
@@ -2782,6 +2845,26 @@ class App(tk.Tk):
                         self._log("MUF: Juliusruh-Ionosonde erfolgreich abgefragt.")
                     if data.get("muf_hamqsl_diag"):
                         self._log(f"hamqsl-Feed: {data['muf_hamqsl_diag']}")
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
+                kind, cat, status, log_lines = self.connect_result_queue.get_nowait()
+                if kind == "lost":
+                    if self.tune.active:
+                        self.tune.active = False
+                        self.tune_btn.configure(text="TUNE (halten)", bg=COL_AMBER, fg="#1a1200")
+                    self.cat.disconnect()
+                    if self.rigctld_process.running:
+                        self.rigctld_process.stop()
+                    self.conn_status_var.set("Verbindung verloren - versuche automatisch neu zu verbinden…")
+                    self.connect_btn.configure(text="Verbinden")
+                    self.cat_badge.configure(bg=COL_RED)
+                    self._log("CAT-Verbindung verloren, versuche automatisch neu zu verbinden.")
+                elif kind == "ok":
+                    self._apply_connected_cat(cat, status, log_lines)
+                    self._log("Automatisch (neu) verbunden.")
         except queue.Empty:
             pass
 

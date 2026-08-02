@@ -177,7 +177,17 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
 1. **Settings** (oben rechts) öffnen, **Backend** wählen (FT-710 direkt
    oder Hamlib rigctld), die dazu passenden Felder ausfüllen (COM-Port +
    Baudrate bzw. Host + Port) und **Verbinden** klicken. Das CAT-Badge
-   oben rechts wird grün, sobald die Verbindung steht.
+   oben rechts wird grün, sobald die Verbindung steht. Backend, Port/Baud
+   bzw. Host/Netzwerk-Port werden bei jeder erfolgreichen Verbindung
+   automatisch in `pota_tune_assist_config.json` gespeichert – beim
+   nächsten Programmstart verbindet die App **automatisch** damit, ganz
+   ohne Klick auf "Verbinden". Bricht die Verbindung während des Betriebs
+   ab (Kabel wackelt, USB-Aussetzer, rigctld stürzt ab), erkennt die App
+   das binnen 15 Sekunden und versucht selbstständig einen Reconnect
+   (Wartezeit zwischen Versuchen verdoppelt sich bei wiederholtem
+   Fehlschlag bis maximal 60 Sekunden). Ein manueller Klick auf
+   **"Trennen"** unterbricht diese automatischen Versuche bewusst, bis
+   wieder auf **"Verbinden"** geklickt wird.
 2. Die Spot-Liste aktualisiert sich automatisch alle 60 Sekunden ("Auto: An"
    umschaltbar, oder manuell über "Refresh"). Band-, Mode-Dropdown sowie das
    Suchfeld filtern die Tabelle. Der **Land-Button** (zeigt "Alle Länder",
