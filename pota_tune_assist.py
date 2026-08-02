@@ -1114,7 +1114,12 @@ class App(tk.Tk):
         # background+font are set here, on purpose. "favorite" is applied
         # after "outdoor" in _render_spots() so a row that is both wins
         # the gold favorite look.
-        self.tree.tag_configure("outdoor", background=COL_OUTDOOR_BG, font=("Segoe UI", 10, "bold"))
+        # No bold font override here (unlike "favorite" below): forcing a
+        # bold weight makes Tk fall back to a monochrome glyph for the 🏕
+        # emoji on Windows instead of the full-color one, since the color
+        # emoji font has no bold variant - the background color alone is
+        # enough to make outdoor rows stand out.
+        self.tree.tag_configure("outdoor", background=COL_OUTDOOR_BG)
         self.tree.tag_configure("favorite", background=COL_FAVORITE_BG, font=("Segoe UI", 10, "bold"))
 
         self.tree.bind("<Double-1>", self._on_tree_double_click)
