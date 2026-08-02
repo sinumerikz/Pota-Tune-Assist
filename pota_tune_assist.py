@@ -549,9 +549,20 @@ class RigctldClient:
         self._transact(f"M {mode_name.upper()} 0")
 
     def get_power(self) -> float:
-        for line in self._transact("l RFPOWER"):
+        lines = self._transact("l RFPOWER")
+        for line in lines:
             if line.startswith("Level Value:"):
                 return float(line.split(":", 1)[1].strip())
+        # Some Hamlib versions/backends format the get_level reply
+        # differently (or don't label it "Level Value:") - fall back to
+        # treating a bare numeric line as the value before giving up.
+        for line in reversed(lines):
+            if line.startswith("RPRT"):
+                continue
+            try:
+                return float(line.strip())
+            except ValueError:
+                continue
         raise CatError("Kein Level in rigctld-Antwort")
 
     def set_power(self, level: float) -> None:
@@ -715,6 +726,7 @@ class TuneController:
         self.saved_freq: int | None = None
         self.saved_mode: str | None = None
         self.saved_power: float | None = None
+        self.power_unreadable = False
         self.last_offset_hz = 0
 
     def start(self, tune_power: float, offset_sign: int, fallback_offset_hz: int) -> None:
@@ -725,7 +737,15 @@ class TuneController:
 
         freq = self.cat.get_freq_hz()
         mode = self.cat.get_mode()
-        power = self.cat.get_power()
+        # Not every Hamlib rig backend supports reading RFPOWER back (many
+        # only support setting it) - that must not block tuning entirely,
+        # it just means the original power can't be restored afterward.
+        try:
+            power = self.cat.get_power()
+            self.power_unreadable = False
+        except CatError:
+            power = None
+            self.power_unreadable = True
 
         self.saved_freq = freq
         self.saved_mode = mode
@@ -2195,6 +2215,11 @@ class App(tk.Tk):
             f"({self.tune.saved_mode}-Bandbreite {abs(offset)} Hz), "
             f"{self.tune_power_var.get():g} {self._power_unit_label()} CW"
         )
+        if self.tune.power_unreadable:
+            self._log(
+                "Hinweis: Rig-Backend meldet kein RFPOWER-Level zurück - "
+                "ursprüngliche Leistung wird nach TUNE nicht wiederhergestellt."
+            )
 
     def _on_tune_release(self, _event) -> None:
         if not self.tune.active:

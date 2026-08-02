@@ -109,6 +109,13 @@ In den **Settings** lässt sich zwischen zwei Backends wählen:
   ("Tune abgebrochen: ..."), auch bei unerwarteten Fehlern – vorher konnte
   das in der `--windowed`-.exe ohne jede Rückmeldung fehlschlagen.
 
+  **"Kein Level in rigctld-Antwort":** Manche Hamlib-Rig-Backends können
+  den aktuellen RFPOWER-Wert nicht auslesen (Setzen geht oft trotzdem).
+  Das blockiert TUNE nicht mehr komplett – die App tunt weiterhin mit der
+  konfigurierten Tune-Leistung, kann die ursprüngliche Leistung danach nur
+  nicht automatisch wiederherstellen (Hinweis dazu in der Statuszeile);
+  Frequenz und Mode werden trotzdem wie gewohnt zurückgesetzt.
+
 Oberfläche im dunklen, militärisch angehauchten Olivgrün-Theme (Filter-Chips,
 Statusbadges, farbcodierte Tabelle nach Betriebsart, rot durchgestrichene
 Zeilen für als ungültig gemeldete Spots, gedämpft grün durchgestrichene
