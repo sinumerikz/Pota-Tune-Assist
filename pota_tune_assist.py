@@ -56,7 +56,7 @@ import tkinter as tk
 import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -70,12 +70,19 @@ WORKED_TODAY_REFRESH_SECONDS = 60
 QRZ_LOGBOOK_API_URL = "https://logbook.qrz.com/api"
 
 # Solar/propagation indices (N0NBH's widely-used ham radio solar data feed,
-# free, no API key). SFI/K/A are global indices; MUF is the feed's single
-# MUF(3000km) figure from its reference station, not specifically Germany -
-# there's no simple free API for a Germany-only MUF (that needs ionosonde
-# data, e.g. the Juliusruh station), so this is the closest practical stand-in.
+# free, no API key). SFI/K/A come from here; MUF is preferentially replaced
+# below by a real Germany-specific reading from the Juliusruh ionosonde
+# (see GIRO_MUF_URL) when that succeeds, falling back to this feed's own
+# global MUF(3000km) reference-station figure otherwise.
 SOLAR_DATA_URL = "https://www.hamqsl.com/solarxml.php"
 SOLAR_POLL_SECONDS = 15 * 60
+
+# GIRO/DIDBase (Global Ionosphere Radio Observatory) real-time data query
+# for the Juliusruh ionosonde (Germany, URSI station code JR055), operated
+# by the Leibniz Institute of Atmospheric Physics - MUFD = MUF(3000km) from
+# actual German ionospheric soundings, not a generic global figure.
+GIRO_MUF_URL = "https://lgdc.uml.edu/common/DIDBGetValues"
+GIRO_STATION_CODE = "JR055"
 
 
 def app_dir() -> Path:
@@ -878,12 +885,69 @@ def fetch_solar_data() -> dict[str, str] | None:
         value = solardata.findtext(tag)
         return value.strip() if value and value.strip() else "?"
 
-    return {
+    result = {
         "sfi": get("solarflux"),
         "k": get("kindex"),
         "a": get("aindex"),
         "muf": get("muf"),
     }
+    if result["muf"] == "?":
+        # Diagnostic for whichever tag actually holds it, if the feed
+        # doesn't use "muf" as assumed - couldn't verify this live.
+        known_tags = ", ".join(child.tag for child in solardata)
+        result["muf_hamqsl_diag"] = f"kein <muf> in Feed, vorhandene Felder: {known_tags}"
+    return result
+
+
+def fetch_juliusruh_muf() -> tuple[str | None, str]:
+    """Latest MUF(3000km) reading from the Juliusruh ionosonde (GIRO/
+    DIDBase, station JR055) - a real Germany-specific measurement, unlike
+    hamqsl's global reference-station MUF. Returns (value_or_None,
+    diagnostic) - this integration couldn't be tested against the live
+    service, so the diagnostic carries enough of the raw response to
+    debug a format mismatch instead of just failing silently."""
+    now = datetime.now(timezone.utc)
+    since = now - timedelta(hours=6)
+    params = {
+        "ursiCode": GIRO_STATION_CODE,
+        "charName": "MUFD",
+        "DMUF": "3000",
+        "fromDate": since.strftime("%Y.%m.%d"),
+        "toDate": now.strftime("%Y.%m.%d"),
+    }
+    try:
+        resp = requests.get(GIRO_MUF_URL, params=params, timeout=10)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        return None, f"Netzwerkfehler: {exc}"
+
+    text = resp.text.strip()
+    if not text:
+        return None, "leere Antwort von GIRO/DIDBase"
+
+    lines = [line for line in text.splitlines() if line.strip() and not line.strip().startswith("#")]
+    if not lines:
+        return None, f"keine Datenzeilen, Rohantwort (Anfang): {text[:300]!r}"
+
+    last_line = lines[-1]
+    value = None
+    for token in last_line.split()[1:]:
+        if "." not in token:
+            # DIDBase's confidence-score column is a plain integer
+            # (e.g. "11", "88") and can fall in the same numeric range as
+            # a real MUF reading - only a token with decimal precision is
+            # trusted as the actual measured value.
+            continue
+        try:
+            candidate = float(token)
+        except ValueError:
+            continue
+        if 2.0 <= candidate <= 60.0:  # plausible MUF range in MHz
+            value = candidate
+            break
+    if value is None:
+        return None, f"konnte keinen Zahlenwert extrahieren, letzte Zeile: {last_line!r}"
+    return f"{value:.1f}", "ok"
 
 
 def grid_to_latlon(grid: str) -> tuple[float, float] | None:
@@ -1215,6 +1279,7 @@ class App(tk.Tk):
         self.count_badge_var = tk.StringVar(value="0 Spots")
         self.solar_data_var = tk.StringVar(value="SFI -- · K -- · A -- · MUF -- MHz")
         self.solar_result_queue: queue.Queue = queue.Queue()
+        self._solar_diag_logged = False
         self.status_var = tk.StringVar(value="Bereit.")
         self.conn_status_var = tk.StringVar(value="Nicht verbunden")
 
@@ -1977,9 +2042,15 @@ class App(tk.Tk):
         self.after(WORKED_TODAY_REFRESH_SECONDS * 1000, self._tick_worked_today)
 
     def _fetch_solar_data_async(self) -> None:
-        data = fetch_solar_data()
-        if data:
-            self.solar_result_queue.put(data)
+        data = fetch_solar_data() or {"sfi": "?", "k": "?", "a": "?", "muf": "?"}
+        muf_value, muf_diag = fetch_juliusruh_muf()
+        if muf_value is not None:
+            data["muf"] = muf_value
+            data["muf_source"] = "Juliusruh"
+        else:
+            data["muf_source"] = "hamqsl" if data["muf"] != "?" else "?"
+            data["muf_diag"] = muf_diag
+        self.solar_result_queue.put(data)
 
     def _tick_solar_data(self) -> None:
         threading.Thread(target=self._fetch_solar_data_async, daemon=True).start()
@@ -2586,6 +2657,17 @@ class App(tk.Tk):
                 self.solar_data_var.set(
                     f"SFI {data['sfi']} · K {data['k']} · A {data['a']} · MUF {data['muf']} MHz"
                 )
+                if not self._solar_diag_logged:
+                    self._solar_diag_logged = True
+                    if data.get("muf_diag") and data["muf_diag"] != "ok":
+                        self._log(
+                            f"Juliusruh-MUF nicht verfügbar (zeige {data['muf_source']}-Wert "
+                            f"stattdessen): {data['muf_diag']}"
+                        )
+                    elif data.get("muf_source") == "Juliusruh":
+                        self._log("MUF: Juliusruh-Ionosonde erfolgreich abgefragt.")
+                    if data.get("muf_hamqsl_diag"):
+                        self._log(f"hamqsl-Feed: {data['muf_hamqsl_diag']}")
         except queue.Empty:
             pass
 
