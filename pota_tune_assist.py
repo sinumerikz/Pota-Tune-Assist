@@ -802,12 +802,21 @@ def format_spot_time(iso_time: str) -> str:
         return iso_time
 
 
-def format_age(iso_time: str) -> str:
+def spot_age_seconds(iso_time: str) -> int:
+    """Seconds since the spot was posted; a large sentinel for spots whose
+    time couldn't be parsed, so they sort/filter as the oldest rather than
+    crashing or looking freshest."""
     try:
         dt = datetime.strptime(iso_time, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
     except ValueError:
+        return 10**9
+    return max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
+
+
+def format_age(iso_time: str) -> str:
+    seconds = spot_age_seconds(iso_time)
+    if seconds >= 10**9:
         return "?"
-    seconds = max(0, int((datetime.now(timezone.utc) - dt).total_seconds()))
     if seconds < 60:
         return f"{seconds}s"
     if seconds < 3600:
@@ -836,6 +845,7 @@ def mode_category(mode: str) -> str:
 
 BAND_FILTER_OPTIONS = ["Alle Bänder"] + [b[2] for b in BAND_RANGES_KHZ]
 MODE_FILTER_OPTIONS = ["Alle Modes", "CW", "SSB", "Digital"]
+AGE_FILTER_OPTIONS = ["Alle", "5 min", "10 min", "15 min"]
 COUNTRY_FILTER_ALL = "Alle Länder"
 
 
@@ -976,6 +986,9 @@ class App(tk.Tk):
         self.offset_sign_var = tk.StringVar(value="above")
         self.band_filter_var = tk.StringVar(value=BAND_FILTER_OPTIONS[0])
         self.mode_filter_var = tk.StringVar(value=MODE_FILTER_OPTIONS[0])
+        self.age_filter_var = tk.StringVar(value=AGE_FILTER_OPTIONS[0])
+        self.sort_column: str | None = None
+        self.sort_reverse: bool = False
         self.selected_countries: set[str] = set(config.get("hunt_countries", []))
         self.known_countries: set[str] = set(self.selected_countries)
         self.country_filter_label_var = tk.StringVar(value=self._country_filter_label())
@@ -1055,6 +1068,13 @@ class App(tk.Tk):
         mode_combo.pack(side="left", padx=(0, 10))
         mode_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_spots())
 
+        tk.Label(filter_row, text="Alter", fg=COL_MUTED, bg=COL_BG,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
+        age_combo = ttk.Combobox(filter_row, textvariable=self.age_filter_var, style="Dark.TCombobox",
+                                  values=AGE_FILTER_OPTIONS, width=8, state="readonly")
+        age_combo.pack(side="left", padx=(0, 10))
+        age_combo.bind("<<ComboboxSelected>>", lambda *_: self._render_spots())
+
         tk.Label(filter_row, text="Land", fg=COL_MUTED, bg=COL_BG,
                  font=("Segoe UI", 8)).pack(side="left", padx=(0, 4))
         _chip_button(
@@ -1088,9 +1108,14 @@ class App(tk.Tk):
             "fav": 30, "outdoor": 30, "qsy": 60, "call": 90, "worked": 220, "freq": 90, "mode": 70,
             "ref": 90, "name": 260, "loc": 70, "age": 60, "skip": 60, "log": 70,
         }
+        self.column_headers = headers
+        sortable_columns = {"call", "worked", "freq", "mode", "ref", "name", "loc", "age"}
         self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
         for col in columns:
-            self.tree.heading(col, text=headers[col])
+            if col in sortable_columns:
+                self.tree.heading(col, text=headers[col], command=lambda c=col: self._sort_by_column(c))
+            else:
+                self.tree.heading(col, text=headers[col])
             anchor = "center" if col in ("fav", "outdoor", "qsy", "skip", "mode", "age", "loc") else "w"
             self.tree.column(col, width=widths[col], anchor=anchor)
 
@@ -1554,11 +1579,20 @@ class App(tk.Tk):
         self._log(f"Alarm: {len(hits)}× Favorit/Draußenfunker neu gespottet.")
 
     def _play_alert_sound(self) -> None:
-        try:
-            import winsound
-            winsound.MessageBeep(winsound.MB_ICONASTERISK)
-        except (ImportError, RuntimeError):
-            self.bell()
+        # winsound.MessageBeep() plays whatever "Asterisk" is mapped to in
+        # the Windows sound scheme, which is silent if the user has "No
+        # Sounds" selected - winsound.Beep() generates its tone directly
+        # instead, so it's always audible. Runs in a thread since Beep()
+        # blocks for its duration and would otherwise freeze the UI.
+        def play() -> None:
+            try:
+                import winsound
+                winsound.Beep(880, 150)
+                winsound.Beep(1175, 180)
+            except (ImportError, RuntimeError, OSError):
+                self.after(0, self.bell)  # bell() must run on the Tk main thread
+
+        threading.Thread(target=play, daemon=True).start()
 
     def _show_alert_toast(self, lines: list[str]) -> None:
         toast = tk.Toplevel(self)
@@ -1599,6 +1633,11 @@ class App(tk.Tk):
         mode_filter = self.mode_filter_var.get()
         if mode_filter != MODE_FILTER_OPTIONS[0] and mode_category(spot.mode) != mode_filter.lower():
             return False
+        age_filter = self.age_filter_var.get()
+        if age_filter != AGE_FILTER_OPTIONS[0]:
+            max_minutes = int(age_filter.split()[0])
+            if spot_age_seconds(spot.spot_time) > max_minutes * 60:
+                return False
         if self.selected_countries and country_for_location(spot.location_desc) not in self.selected_countries:
             return False
         needle = self.filter_var.get().strip().lower()
@@ -1720,9 +1759,49 @@ class App(tk.Tk):
     def _is_outdoor(self, spot: Spot) -> bool:
         return (spot.activator or "").strip().upper() in self.outdoor_calls
 
+    def _column_sort_key(self, col: str):
+        if col == "freq":
+            return lambda s: s.frequency_khz
+        if col == "age":
+            return lambda s: spot_age_seconds(s.spot_time)
+        if col == "call":
+            return lambda s: (s.activator or "").upper()
+        if col == "mode":
+            return lambda s: (s.mode or "").upper()
+        if col == "ref":
+            return lambda s: (s.reference or "").upper()
+        if col == "name":
+            return lambda s: (s.park_name or "").upper()
+        if col == "loc":
+            return lambda s: (s.location_desc or "").upper()
+        if col == "worked":
+            return lambda s: worked_today_badge(s, self.worked_today_index)
+        return lambda s: 0
+
+    def _sort_by_column(self, col: str) -> None:
+        if self.sort_column == col:
+            self.sort_reverse = not self.sort_reverse
+        else:
+            self.sort_column = col
+            self.sort_reverse = False
+        for c, base_text in self.column_headers.items():
+            if c not in self.tree["columns"] or not base_text:
+                continue
+            if c == self.sort_column:
+                arrow = " ▼" if self.sort_reverse else " ▲"
+                self.tree.heading(c, text=base_text + arrow)
+            else:
+                self.tree.heading(c, text=base_text)
+        self._render_spots()
+
     def _render_spots(self) -> None:
         self.tree.delete(*self.tree.get_children())
         visible = [s for s in self.spots if self._spot_passes_filters(s)]
+        # Stable sort, least significant first: column sort (if any) orders
+        # spots within each favorite/outdoor group, then the priority sort
+        # moves favorites/outdoor spots to the top regardless of column sort.
+        if self.sort_column:
+            visible.sort(key=self._column_sort_key(self.sort_column), reverse=self.sort_reverse)
         visible.sort(key=lambda s: (not self._is_favorite(s), not self._is_outdoor(s)))
         for i, spot in enumerate(visible):
             category = mode_category(spot.mode)
