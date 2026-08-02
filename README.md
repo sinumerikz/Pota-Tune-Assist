@@ -125,7 +125,10 @@ In den **Settings** lässt sich zwischen zwei Backends wählen:
 Oberfläche im dunklen, militärisch angehauchten Olivgrün-Theme (Filter-Chips,
 Statusbadges, farbcodierte Tabelle nach Betriebsart, rot durchgestrichene
 Zeilen für als ungültig gemeldete Spots, gedämpft grün durchgestrichene
-Zeilen für bereits geloggte Kontakte).
+Zeilen für bereits geloggte Kontakte). Unter Windows 10 (2004+)/11 wird
+zusätzlich auch die native Fenster-Titelleiste (Haupt- und alle
+Dialogfenster) per DWM-API dunkel eingefärbt statt im Standard-Weiß von
+Windows zu bleiben.
 
 ## Installation
 

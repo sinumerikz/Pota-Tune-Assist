@@ -1219,6 +1219,27 @@ COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
 
 
+def apply_dark_titlebar(window) -> None:
+    """Windows 10 (2004+)/11 only: switches the *native* window title bar
+    to dark mode via DWM. Tkinter has no theme hook for the OS-drawn
+    title bar - it stays white/light regardless of the app's own colors
+    unless a program explicitly opts in through this Win32 API. No-op
+    (silently) on anything else, including older Windows without this
+    DWM attribute."""
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
+        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        value = ctypes.c_int(1)
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value),
+        )
+    except (OSError, AttributeError):
+        pass
+
+
 def _chip_button(parent, text, command=None, **kw):
     return tk.Button(
         parent, text=text, command=command,
@@ -1243,6 +1264,7 @@ class App(tk.Tk):
         self.geometry("1320x680")
         self.minsize(1180, 560)
         self.configure(bg=COL_BG)
+        apply_dark_titlebar(self)
 
         self._init_style()
 
@@ -1548,6 +1570,7 @@ class App(tk.Tk):
         dlg.title("Settings")
         dlg.geometry("420x600")
         dlg.configure(bg=COL_PANEL)
+        apply_dark_titlebar(dlg)
         dlg.transient(self)
 
         def row(parent, label):
@@ -1803,6 +1826,7 @@ class App(tk.Tk):
         dlg.title("CAT-Log")
         dlg.geometry("640x420")
         dlg.configure(bg=COL_PANEL)
+        apply_dark_titlebar(dlg)
         dlg.transient(self)
 
         tk.Label(
@@ -2204,6 +2228,7 @@ class App(tk.Tk):
         dlg.geometry("300x460")
         dlg.configure(bg=COL_PANEL)
         dlg.transient(self)
+        apply_dark_titlebar(dlg)
 
         tk.Label(
             dlg, text="Nur Spots aus ausgewählten Ländern anzeigen.\nNichts ausgewählt = alle Länder.",
@@ -2581,6 +2606,7 @@ class App(tk.Tk):
         dlg.geometry("360x460")
         dlg.configure(bg=COL_PANEL)
         dlg.transient(self)
+        apply_dark_titlebar(dlg)
 
         vars_: dict[str, tk.StringVar] = {
             "call": tk.StringVar(value=spot.activator),
