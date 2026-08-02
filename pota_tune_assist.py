@@ -78,6 +78,7 @@ def app_dir() -> Path:
 CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
 LOG_DIR = app_dir() / "logs"
 OUTDOOR_LIST_PATH = app_dir() / "draussenfunker.txt"
+OUTDOOR_LIST_URL = "https://calls.draussenfunker.de/df-polo-notes.txt"
 
 ADIF_HEADER = (
     "POTA Tune Assist ADIF Log\n"
@@ -103,18 +104,13 @@ def save_config(config: dict) -> None:
         pass
 
 
-def load_outdoor_calls() -> set[str]:
-    """Reads the user-maintained "Draussenfunker" watchlist: one callsign
-    per line, '#' starts a comment, everything after the first whitespace
-    on a line is ignored so trailing notes don't break parsing. Missing
-    file is not an error - just means an empty list."""
-    try:
-        with open(OUTDOOR_LIST_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except OSError:
-        return set()
+def parse_outdoor_calls(text: str) -> set[str]:
+    """Parses a Ham2K PoLo callsign-notes-style watchlist: one entry per
+    line, first whitespace-separated token is the callsign, everything
+    after it (emoji, name, tags, ...) is ignored. '#' starts a comment,
+    blank lines are skipped."""
     calls: set[str] = set()
-    for line in lines:
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -122,6 +118,33 @@ def load_outdoor_calls() -> set[str]:
         if call:
             calls.add(call)
     return calls
+
+
+def load_outdoor_calls() -> set[str]:
+    """Downloads the Draussenfunker watchlist fresh from OUTDOOR_LIST_URL
+    on every start and caches the raw response in OUTDOOR_LIST_PATH, so a
+    start without internet (e.g. out in a park) still has the last known
+    list instead of an empty one."""
+    try:
+        resp = requests.get(OUTDOOR_LIST_URL, timeout=10)
+        resp.raise_for_status()
+        text = resp.text
+    except (requests.RequestException, OSError):
+        text = None
+
+    if text is not None:
+        try:
+            with open(OUTDOOR_LIST_PATH, "w", encoding="utf-8") as f:
+                f.write(text)
+        except OSError:
+            pass
+        return parse_outdoor_calls(text)
+
+    try:
+        with open(OUTDOOR_LIST_PATH, "r", encoding="utf-8") as f:
+            return parse_outdoor_calls(f.read())
+    except OSError:
+        return set()
 
 
 def _adif_field(name: str, value: str) -> str:
@@ -923,6 +946,7 @@ class App(tk.Tk):
         self.auto_refresh = True
         self.spot_result_queue: queue.Queue = queue.Queue()
         self.log_result_queue: queue.Queue = queue.Queue()
+        self.outdoor_result_queue: queue.Queue = queue.Queue()
         self.stop_poll_event = threading.Event()
 
         self.backend_var = tk.StringVar(value="ft710")
@@ -933,7 +957,7 @@ class App(tk.Tk):
         self.my_grid_var = tk.StringVar(value=config.get("my_gridsquare", ""))
         self.qrz_api_key_var = tk.StringVar(value=config.get("qrz_api_key", ""))
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
-        self.outdoor_calls: set[str] = load_outdoor_calls()
+        self.outdoor_calls: set[str] = set()
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.IntVar(value=CAT_BAUD_DEFAULT)
@@ -963,6 +987,7 @@ class App(tk.Tk):
         self._build_ui()
         self._refresh_ports()
         self._start_poll_thread()
+        threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
         self.after(200, self._tick)
         self._tick_clock()
         self._refresh_worked_today()
@@ -1482,6 +1507,9 @@ class App(tk.Tk):
         except (requests.RequestException, ValueError) as exc:
             self.spot_result_queue.put(("error", str(exc)))
 
+    def _load_outdoor_calls_async(self) -> None:
+        self.outdoor_result_queue.put(load_outdoor_calls())
+
     # -- table rendering ----------------------------------------------------------
 
     def _spot_passes_filters(self, spot: Spot) -> bool:
@@ -1946,6 +1974,14 @@ class App(tk.Tk):
         try:
             while True:
                 self._log(self.log_result_queue.get_nowait())
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
+                self.outdoor_calls = self.outdoor_result_queue.get_nowait()
+                self._render_spots()
+                self._log(f"{len(self.outdoor_calls)} Draußenfunker-Rufzeichen geladen.")
         except queue.Empty:
             pass
 

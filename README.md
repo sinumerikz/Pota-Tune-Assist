@@ -156,31 +156,25 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
 
 ## Draußenfunker-Liste
 
-Eigene Rufzeichen-Liste (z. B. befreundete Aktivierende), die beim
-**Programmstart** einmal aus der Textdatei `draussenfunker.txt` (liegt
-neben dem Programm bzw. der .exe) eingelesen wird – ein Rufzeichen pro
-Zeile, Groß-/Kleinschreibung egal:
+Bei jedem **Programmstart** lädt die App im Hintergrund automatisch die
+aktuelle Rufzeichen-Watchlist von
+[calls.draussenfunker.de](https://calls.draussenfunker.de/df-polo-notes.txt)
+herunter (Ham2K-PoLo-"Callsign notes"-Format) – keine manuelle Pflege
+nötig. Der Download läuft asynchron, damit die Oberfläche sofort startet;
+sobald die Liste da ist, werden passende Spots automatisch markiert.
 
-```
-# Zeilen mit # sind Kommentare, Leerzeilen werden ignoriert
-DL2MBN
-OE1ABC   Hans, aktiviert oft im Schwarzwald
-DL3XYZ
-```
-
-Text nach dem ersten Leerzeichen in einer Zeile wird ignoriert – dort kann
-also z. B. der Name oder eine Notiz stehen. Existiert die Datei nicht, ist
-die Liste einfach leer, es gibt keine Fehlermeldung.
+Die zuletzt heruntergeladene Liste wird lokal in `draussenfunker.txt`
+zwischengespeichert. Schlägt der Download beim Start fehl (z. B. kein
+Internet, etwa mitten im Park), liest die App stattdessen diesen letzten
+bekannten Stand erneut ein – nur beim allerersten Start ganz ohne
+Internetverbindung bleibt die Liste leer.
 
 Taucht ein Spot mit einem Rufzeichen aus dieser Liste auf, bekommt die
 Zeile in der Tabelle die **🏕-Markierung** in der Spalte links neben
 "▶ QSY" sowie einen eigenen blaugrünen Zeilenhintergrund (zur
 Unterscheidung von den goldenen ⭐-Favoriten) und wird – wie Favoriten –
 automatisch nach oben in der Liste einsortiert (Favoriten zuerst, danach
-Draußenfunker-Treffer, danach der Rest). Anders als die Favoriten ist die
-Liste nicht in der App editierbar, sondern wird ausschließlich über die
-Textdatei gepflegt; Änderungen daran wirken erst nach einem Neustart der
-App.
+Draußenfunker-Treffer, danach der Rest).
 
 ## TUNE-Versatz: automatisch nach Modus-Bandbreite
 

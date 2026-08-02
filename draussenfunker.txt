@@ -1,10 +1,7 @@
-# Draussenfunker-Liste fuer POTA Tune Assist
+# Lokaler Zwischenspeicher der Draussenfunker-Watchlist.
 #
-# Ein Rufzeichen pro Zeile. Gross-/Kleinschreibung ist egal.
-# Zeilen, die mit '#' beginnen, sind Kommentare und werden ignoriert.
-# Alles nach dem ersten Leerzeichen in einer Zeile wird ignoriert -
-# dort kann z. B. ein Name oder eine Notiz stehen.
-#
-# Beispiel:
-# DL2MBN
-# OE1ABC   Hans, aktiviert oft im Schwarzwald
+# Diese Datei wird bei jedem Programmstart automatisch von
+# https://calls.draussenfunker.de/df-polo-notes.txt heruntergeladen und
+# hier ueberschrieben - nicht von Hand pflegen. Nur wenn der Download beim
+# Start fehlschlaegt (z. B. kein Internet), liest die App diesen letzten
+# erfolgreich heruntergeladenen Stand erneut ein.
