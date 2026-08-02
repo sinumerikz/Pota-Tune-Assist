@@ -1,4 +1,4 @@
-# DL2MBN Tune Assist
+# POTA Tune Assist
 
 Python-Desktop-App (Windows/Mac/Linux) für den Amateurfunk: verbindet sich
 per CAT mit dem Funkgerät, zeigt eine live aktualisierte POTA-Spot-Liste,
@@ -88,7 +88,7 @@ Zeilen für bereits geloggte Kontakte).
 
 ### Windows: fertige .exe
 
-[`DL2MBN-Tune-Assist.exe`](DL2MBN-Tune-Assist.exe) liegt bereits im Ordner –
+[`POTA-Tune-Assist.exe`](POTA-Tune-Assist.exe) liegt bereits im Ordner –
 kein Python nötig, einfach starten. Windows SmartScreen warnt bei
 unsignierten .exe-Dateien aus dem Internet – das ist bei selbst gebauten
 PyInstaller-Programmen normal.
@@ -110,7 +110,7 @@ Eigene .exe bauen:
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --windowed --name "DL2MBN-Tune-Assist" pota_tune_assist.py
+pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
 ```
 
 ## FT-710 CAT-Einstellungen
@@ -132,7 +132,7 @@ pyinstaller --onefile --windowed --name "DL2MBN-Tune-Assist" pota_tune_assist.py
    Spot-Liste vorkam ("Alle"/"Keine" zum Schnellauswählen, sowie ein
    **Kontinent-Schnellwahl** EU/NA/SA/AS/AF/OC – klickt alle bekannten
    Länder des jeweiligen Kontinents an bzw. wieder ab). Die Auswahl wird in
-   `dl2mbn_config.json` gespeichert und bleibt über Neustarts hinweg
+   `pota_tune_assist_config.json` gespeichert und bleibt über Neustarts hinweg
    erhalten. "Skip" blendet einzelne Spots aus, "Alle anzeigen" setzt das
    zurück. **"CAT-Log"** öffnet ein Debug-Fenster mit den rohen
    CAT-Befehlen/-Antworten (nur FT-710-CAT-Backend).
@@ -141,7 +141,7 @@ pyinstaller --onefile --windowed --name "DL2MBN-Tune-Assist" pota_tune_assist.py
    werden rot durchgestrichen dargestellt, bleiben aber anklickbar. Der
    **☆-Stern** links von QSY markiert ein Rufzeichen als Favorit (⭐) –
    favorisierte Rufzeichen werden über alle Bands/Modes hinweg dauerhaft
-   gemerkt (`dl2mbn_config.json`) und ihre Spots erscheinen immer ganz
+   gemerkt (`pota_tune_assist_config.json`) und ihre Spots erscheinen immer ganz
    oben in der Liste, egal wie sortiert/gefiltert wird. Favoriten-Zeilen
    bekommen zusätzlich einen eigenen goldbraunen Zeilenhintergrund plus
    fette Schrift statt der normalen Mode-Farbcodierung.
@@ -197,7 +197,7 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    den eigenen Locator und den **QRZ-Logbook-API-Key** eintragen und
    "Speichern" klicken. Der QRZ-API-Key steht im QRZ-Logbook unter
    *Settings → API Key* (nicht der allgemeine XML-Subscription-Key, sondern
-   der Logbook-eigene). Diese Angaben werden lokal in `dl2mbn_config.json`
+   der Logbook-eigene). Diese Angaben werden lokal in `pota_tune_assist_config.json`
    neben dem Programm gespeichert. Ist kein API-Key hinterlegt, wird nur
    lokal geloggt, ohne QRZ-Upload.
 2. In der Spot-Tabelle auf **📝 Log** in der gewünschten Zeile klicken. Der
@@ -205,7 +205,7 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    Mode (aus dem Spot) sowie der POTA-Referenz als `SIG_INFO` vorausgefüllt
    und komplett editierbar (z. B. für RST, Name, Locator, Kommentar).
 3. **Log Contact** klicken: Der QSO wird als ADIF-Datensatz an
-   `logs/dl2mbn_log_<QSO_DATE>.adi` angehängt – **pro Tag eine eigene
+   `logs/pota_tune_assist_log_<QSO_DATE>.adi` angehängt – **pro Tag eine eigene
    Datei**, ein neuer Tag landet nie in der Datei des Vortages. Ist ein
    API-Key hinterlegt, wird derselbe Datensatz zusätzlich automatisch per
    QRZ-Logbook-API (`https://logbook.qrz.com/api`, `ACTION=INSERT`) ins
@@ -218,7 +218,7 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
 
 ## Heute schon gearbeitet / New Band-Mode-Park
 
-Die App liest die heutige ADIF-Logdatei (`logs/dl2mbn_log_<heute>.adi`) beim
+Die App liest die heutige ADIF-Logdatei (`logs/pota_tune_assist_log_<heute>.adi`) beim
 Start und danach alle 60 Sekunden neu ein (außerdem sofort nach jedem
 "Log Contact") und gleicht jeden Spot in der Tabelle dagegen ab – Ergebnis
 steht in der Spalte **HEUTE**:

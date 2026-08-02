@@ -75,13 +75,13 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-CONFIG_PATH = app_dir() / "dl2mbn_config.json"
+CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
 LOG_DIR = app_dir() / "logs"
 
 ADIF_HEADER = (
-    "DL2MBN Tune Assist ADIF Log\n"
+    "POTA Tune Assist ADIF Log\n"
     "<ADIF_VER:5>3.1.4\n"
-    "<PROGRAMID:17>DL2MBN-TuneAssist\n"
+    "<PROGRAMID:15>POTA-TuneAssist\n"
     "<EOH>\n"
 )
 
@@ -116,7 +116,7 @@ def daily_adif_path(qso_date: str) -> Path:
     """One ADIF file per QSO day - a new day never gets appended to a
     previous day's file."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    return LOG_DIR / f"dl2mbn_log_{qso_date}.adi"
+    return LOG_DIR / f"pota_tune_assist_log_{qso_date}.adi"
 
 
 def append_adif_record(qso_date: str, record: str) -> Path:
@@ -884,7 +884,7 @@ def _badge(parent, textvariable=None, text=None, fg=COL_TEXT, bg=COL_PANEL_ALT):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("DL2MBN Tune Assist")
+        self.title("POTA Tune Assist")
         self.geometry("1320x680")
         self.minsize(1180, 560)
         self.configure(bg=COL_BG)
@@ -975,9 +975,9 @@ class App(tk.Tk):
 
         title_row = tk.Frame(header, bg=COL_BG)
         title_row.pack(fill="x")
-        tk.Label(title_row, text="DL2MBN", fg=COL_ACCENT, bg=COL_BG,
+        tk.Label(title_row, text="POTA", fg=COL_ACCENT, bg=COL_BG,
                  font=("Segoe UI", 16, "bold")).pack(side="left")
-        tk.Label(title_row, text="  Tune Assist · FT-710 / Hamlib / POTA", fg=COL_MUTED, bg=COL_BG,
+        tk.Label(title_row, text="  Tune Assist · FT-710 / Hamlib", fg=COL_MUTED, bg=COL_BG,
                  font=("Segoe UI", 11)).pack(side="left", pady=(4, 0))
 
         tk.Label(title_row, textvariable=self.clock_var, fg=COL_ACCENT, bg=COL_BG,
