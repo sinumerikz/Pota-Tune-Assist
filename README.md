@@ -320,7 +320,9 @@ klicken.
   Rufzeichen für die laufende Sitzung zwischengespeichert, damit derselbe
   Aktivator nicht mehrfach abgefragt wird) und berechnet die Luftlinien-
   Entfernung zu deinem eigenen Locator. Die Spalte ist wie alle anderen
-  sortierbar.
+  sortierbar. Neue Rufzeichen werden über einen Pool von 6 parallelen
+  Abfragen nachgeladen (nicht nacheinander), damit z. B. nach dem Start
+  viele gleichzeitig aktive Spots zügig ihre Entfernung bekommen.
 - Fehlt eines der drei Felder (Benutzer, Passwort oder eigener Locator),
   bleibt die KM-Spalte komplett ausgeblendet und es werden **keinerlei**
   QRZ-XML-Abfragen ausgeführt.

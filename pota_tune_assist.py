@@ -884,6 +884,7 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
+LOCATOR_WORKER_COUNT = 6
 
 
 class QrzXmlError(Exception):
@@ -902,7 +903,11 @@ class QrzXmlClient:
 
     def __init__(self) -> None:
         self.session_key: str | None = None
-        self._lock = threading.Lock()
+        # Guards only session_key reads/writes during (re-)authentication -
+        # deliberately NOT held around the actual per-callsign lookup
+        # request, so many lookups can run concurrently once a session
+        # exists instead of queuing up behind one another one at a time.
+        self._auth_lock = threading.Lock()
 
     @staticmethod
     def _request(params: dict) -> ET.Element:
@@ -926,28 +931,34 @@ class QrzXmlClient:
             raise QrzXmlAuthError("QRZ-Login: keine Session erhalten.")
         self.session_key = key
 
-    def lookup_latlon(self, username: str, password: str, callsign: str) -> tuple[float, float] | None:
-        with self._lock:
+    def _ensure_session(self, username: str, password: str) -> str:
+        with self._auth_lock:
             if not self.session_key:
                 self._authenticate(username, password)
-            root = self._request({"s": self.session_key, "callsign": callsign})
-            error = root.findtext("./Session/Error")
-            if error and "session" in error.lower():
+            return self.session_key
+
+    def lookup_latlon(self, username: str, password: str, callsign: str) -> tuple[float, float] | None:
+        session_key = self._ensure_session(username, password)
+        root = self._request({"s": session_key, "callsign": callsign})
+        error = root.findtext("./Session/Error")
+        if error and "session" in error.lower():
+            with self._auth_lock:
                 self._authenticate(username, password)
-                root = self._request({"s": self.session_key, "callsign": callsign})
-                error = root.findtext("./Session/Error")
-            if error:
-                if "not found" in error.lower():
-                    return None
-                raise QrzXmlError(error)
-            lat = root.findtext("./Callsign/lat")
-            lon = root.findtext("./Callsign/lon")
-            if lat is None or lon is None:
+                session_key = self.session_key
+            root = self._request({"s": session_key, "callsign": callsign})
+            error = root.findtext("./Session/Error")
+        if error:
+            if "not found" in error.lower():
                 return None
-            try:
-                return float(lat), float(lon)
-            except ValueError:
-                return None
+            raise QrzXmlError(error)
+        lat = root.findtext("./Callsign/lat")
+        lon = root.findtext("./Callsign/lon")
+        if lat is None or lon is None:
+            return None
+        try:
+            return float(lat), float(lon)
+        except ValueError:
+            return None
 
 
 def format_spot_time(iso_time: str) -> str:
@@ -1132,6 +1143,7 @@ class App(tk.Tk):
         self.locator_cache: dict[str, tuple[float, float] | None] = {}
         self.locator_lookup_pending: set[str] = set()
         self.locator_result_queue: queue.Queue = queue.Queue()
+        self.locator_work_queue: queue.Queue = queue.Queue()
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
         self.outdoor_calls: set[str] = set()
 
@@ -1174,6 +1186,8 @@ class App(tk.Tk):
         self._refresh_ports()
         self._start_poll_thread()
         threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
+        for _ in range(LOCATOR_WORKER_COUNT):
+            threading.Thread(target=self._locator_worker, daemon=True).start()
         self.after(200, self._tick)
         self._tick_clock()
         self._refresh_worked_today()
@@ -2054,27 +2068,33 @@ class App(tk.Tk):
     def _queue_locator_lookups(self, spots: list[Spot]) -> None:
         if not self._qrz_xml_ready():
             return
-        username = self.qrz_xml_user_var.get().strip()
-        password = self.qrz_xml_pass_var.get().strip()
         calls = {(s.activator or "").strip().upper() for s in spots if s.activator}
         for call in calls:
             if not call or call in self.locator_cache or call in self.locator_lookup_pending:
                 continue
             self.locator_lookup_pending.add(call)
-            threading.Thread(
-                target=self._lookup_locator_async, args=(username, password, call), daemon=True,
-            ).start()
+            self.locator_work_queue.put(call)
 
-    def _lookup_locator_async(self, username: str, password: str, call: str) -> None:
-        try:
-            latlon = self.qrz_xml_client.lookup_latlon(username, password, call)
-        except QrzXmlAuthError as exc:
-            self.locator_result_queue.put(("auth_error", call, str(exc)))
-            return
-        except (QrzXmlError, requests.RequestException) as exc:
-            self.locator_result_queue.put(("error", call, str(exc)))
-            return
-        self.locator_result_queue.put(("ok", call, latlon))
+    def _locator_worker(self) -> None:
+        """Persistent pool of LOCATOR_WORKER_COUNT threads pulling from a
+        shared queue - a single QRZ session key is reused across all of
+        them (see QrzXmlClient), so this gives real parallel lookups
+        instead of one thread per callsign serializing behind a lock."""
+        while True:
+            call = self.locator_work_queue.get()
+            username = self.qrz_xml_user_var.get().strip()
+            password = self.qrz_xml_pass_var.get().strip()
+            if username and password:
+                try:
+                    latlon = self.qrz_xml_client.lookup_latlon(username, password, call)
+                    self.locator_result_queue.put(("ok", call, latlon))
+                except QrzXmlAuthError as exc:
+                    self.locator_result_queue.put(("auth_error", call, str(exc)))
+                except (QrzXmlError, requests.RequestException) as exc:
+                    self.locator_result_queue.put(("error", call, str(exc)))
+            else:
+                self.locator_result_queue.put(("error", call, "keine Zugangsdaten mehr hinterlegt"))
+            self.locator_work_queue.task_done()
 
     def _column_sort_key(self, col: str):
         if col == "freq":
