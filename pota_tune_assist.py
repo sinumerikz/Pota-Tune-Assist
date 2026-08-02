@@ -1348,10 +1348,8 @@ class App(tk.Tk):
         _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
-        self.update_btn = _chip_button(
-            filter_row, "🔄 Update installieren", command=self._apply_update,
-            bg=COL_GREEN, fg="white", activebackground=COL_GREEN,
-        )
+        self.update_btn = _chip_button(filter_row, "🔄 Update installieren", command=self._apply_update)
+        self.update_btn.configure(bg=COL_GREEN, fg="white", activebackground=COL_GREEN)
         # Not packed here on purpose - only shown once a new build has
         # actually finished downloading (see _tick()'s update_result_queue
         # handling), so it's invisible for the vast majority of runs.
