@@ -41,6 +41,7 @@ power is a level, not watts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -83,14 +84,25 @@ LOG_DIR = app_dir() / "logs"
 OUTDOOR_LIST_PATH = app_dir() / "draussenfunker.txt"
 OUTDOOR_LIST_URL = "https://calls.draussenfunker.de/df-polo-notes.txt"
 
-# Self-update: GitHub Actions writes VERSION (the short commit SHA it
-# built from) next to the .exe on every automated build. The running app
-# compares its own local copy against the one currently on `main` - if
-# they differ, a newer build exists.
+# Self-update: the build workflow patches APP_BUILD_VERSION below (via
+# sed, on the CI runner's working copy only - never committed back) to
+# the short commit SHA right before running PyInstaller, so the value is
+# baked directly into the compiled .exe. It also writes/commits the same
+# SHA to VERSION next to the exe as the "what's the latest build"
+# reference other installs check against. Deliberately NOT comparing two
+# separate on-disk files (local VERSION vs. remote VERSION): if a user
+# replaces only the .exe by hand (e.g. a plain browser download of just
+# that one file) without also updating a sidecar VERSION file, a
+# file-vs-file comparison would permanently claim "outdated" even on the
+# latest build. Comparing the version baked into the running exe itself
+# can't go out of sync that way - it always travels with the code that's
+# actually executing.
+APP_BUILD_VERSION = "dev"
 GITHUB_RAW_BASE = "https://raw.githubusercontent.com/sinumerikz/Pota-Tune-Assist/main"
 VERSION_PATH = app_dir() / "VERSION"
 VERSION_CHECK_URL = f"{GITHUB_RAW_BASE}/VERSION"
 EXE_DOWNLOAD_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe"
+EXE_CHECKSUM_URL = f"{GITHUB_RAW_BASE}/POTA-Tune-Assist.exe.sha256"
 EXE_NAME = "POTA-Tune-Assist.exe"
 
 ADIF_HEADER = (
@@ -160,13 +172,6 @@ def load_outdoor_calls() -> set[str]:
         return set()
 
 
-def read_local_version() -> str:
-    try:
-        return VERSION_PATH.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-
-
 def check_remote_version() -> str | None:
     """Latest VERSION on `main`, or None if unreachable - never raises."""
     try:
@@ -179,22 +184,40 @@ def check_remote_version() -> str | None:
 
 def download_new_exe(dest: Path) -> None:
     """Downloads the current .exe from `main` to `dest` (a *.new sibling
-    of the running exe, never the running file itself). Raises on any
-    failure - a partial/corrupt download must not be swapped in."""
+    of the running exe, never the running file itself) and verifies it
+    against the SHA-256 the build workflow published alongside it. Raises
+    on any failure or mismatch - a partial/corrupt download (observed:
+    "Failed to load Python DLL" from a truncated onefile archive) must
+    never be swapped in."""
+    checksum_resp = requests.get(EXE_CHECKSUM_URL, timeout=10)
+    checksum_resp.raise_for_status()
+    expected_sha256 = checksum_resp.text.strip().split()[0].lower()
+
     resp = requests.get(EXE_DOWNLOAD_URL, timeout=60)
     resp.raise_for_status()
-    if len(resp.content) < 1_000_000:  # a real build is >10 MB; a few KB means an error page
-        raise ValueError(f"Heruntergeladene Datei ist verdächtig klein ({len(resp.content)} Bytes).")
+    content = resp.content
+    if len(content) < 1_000_000:  # a real build is >10 MB; a few KB means an error page
+        raise ValueError(f"Heruntergeladene Datei ist verdächtig klein ({len(content)} Bytes).")
+
+    actual_sha256 = hashlib.sha256(content).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"Prüfsumme stimmt nicht überein (Download beschädigt?): "
+            f"erwartet {expected_sha256[:12]}…, erhalten {actual_sha256[:12]}…"
+        )
+
     tmp = dest.with_suffix(dest.suffix + ".part")
     with open(tmp, "wb") as f:
-        f.write(resp.content)
+        f.write(content)
     tmp.replace(dest)
 
 
-def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> Path:
+def write_update_batch(pid: int, old_exe: Path, new_exe: Path) -> Path:
     """A tiny helper script that waits for this process to actually exit
     (a running .exe can't overwrite itself), then swaps the downloaded
-    build into place, updates VERSION, relaunches, and deletes itself.
+    build into place, relaunches, and deletes itself. The new .exe already
+    has its own version baked in (APP_BUILD_VERSION) - no separate VERSION
+    file needs writing/staying in sync here.
 
     Written using ONLY single-line "if ... goto label" statements - no
     parenthesized multi-line if-blocks. cmd.exe counts every "(" and ")"
@@ -238,7 +261,6 @@ def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> 
         "goto moveloop\r\n"
         ":moveok\r\n"
         f'echo [%date% %time%] Verschieben erfolgreich nach %MOVECOUNT% Versuchen >> "{log_path}"\r\n'
-        f'> "{VERSION_PATH}" echo {version}\r\n'
         "goto relaunch\r\n"
         ":movefailed\r\n"
         f'echo [%date% %time%] Verschieben nach %MOVECOUNT% Versuchen aufgegeben >> "{log_path}"\r\n'
@@ -2212,15 +2234,16 @@ class App(tk.Tk):
     # -- self-update ---------------------------------------------------------------
 
     def _check_for_update_async(self) -> None:
+        if APP_BUILD_VERSION == "dev":
+            return  # not a CI build (patched at build time) - nothing reliable to compare
         remote_version = check_remote_version()
         if not remote_version:
             return  # unreachable / offline - stay quiet, this is a background nicety
-        local_version = read_local_version()
-        if local_version and local_version == remote_version:
-            self.update_result_queue.put(("uptodate", f"lokal {local_version} = aktuell"))
+        if APP_BUILD_VERSION == remote_version:
+            self.update_result_queue.put(("uptodate", f"eigene Version {APP_BUILD_VERSION} = aktuell"))
             return
         self.update_result_queue.put(
-            ("checking", f"lokal {local_version or '(keine VERSION-Datei)'} → verfügbar {remote_version}")
+            ("checking", f"eigene Version {APP_BUILD_VERSION} → verfügbar {remote_version}")
         )
         new_exe_path = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
         try:
@@ -2248,7 +2271,7 @@ class App(tk.Tk):
         old_exe = Path(sys.executable)
         new_exe = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
         try:
-            batch_path = write_update_batch(os.getpid(), old_exe, new_exe, self.pending_update_version)
+            batch_path = write_update_batch(os.getpid(), old_exe, new_exe)
             # CREATE_NO_WINDOW alone (not combined with DETACHED_PROCESS -
             # those two are contradictory: DETACHED_PROCESS means "no
             # console at all", which breaks console-dependent commands
