@@ -844,7 +844,7 @@ def mode_category(mode: str) -> str:
 
 
 BAND_FILTER_OPTIONS = ["Alle Bänder"] + [b[2] for b in BAND_RANGES_KHZ]
-MODE_FILTER_OPTIONS = ["Alle Modes", "CW", "SSB", "Digital"]
+MODE_FILTER_OPTIONS = ["Alle Modes", "CW", "SSB", "CW & SSB", "Digital"]
 AGE_FILTER_OPTIONS = ["Alle", "5 min", "10 min", "15 min"]
 COUNTRY_FILTER_ALL = "Alle Länder"
 
@@ -1091,6 +1091,7 @@ class App(tk.Tk):
         self.scan_btn.pack(side="left", padx=4)
         self.alert_btn = _chip_button(filter_row, "Alarm: An", command=self._toggle_priority_alert)
         self.alert_btn.pack(side="left", padx=4)
+        _chip_button(filter_row, "Alarm testen", command=self._test_priority_alert).pack(side="left", padx=4)
         _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
@@ -1535,6 +1536,14 @@ class App(tk.Tk):
             fg=COL_ACCENT if self.priority_alert_enabled else COL_MUTED,
         )
 
+    def _test_priority_alert(self) -> None:
+        """Manually fires sound+toast, bypassing the mute toggle, so the
+        alert can be tried out without waiting for a real favorite/
+        Draussenfunker spot."""
+        self._play_alert_sound()
+        self._show_alert_toast(["🔔 Test-Alarm - so sieht/klingt ein echter Treffer aus."])
+        self._log("Alarm-Test ausgelöst.")
+
     def _unskip_all(self) -> None:
         self.skipped_ids.clear()
         self._render_spots()
@@ -1579,18 +1588,24 @@ class App(tk.Tk):
         self._log(f"Alarm: {len(hits)}× Favorit/Draußenfunker neu gespottet.")
 
     def _play_alert_sound(self) -> None:
-        # winsound.MessageBeep() plays whatever "Asterisk" is mapped to in
-        # the Windows sound scheme, which is silent if the user has "No
-        # Sounds" selected - winsound.Beep() generates its tone directly
-        # instead, so it's always audible. Runs in a thread since Beep()
-        # blocks for its duration and would otherwise freeze the UI.
+        # Belt-and-suspenders: try winsound.Beep() (a directly generated
+        # tone, independent of the Windows sound scheme) AND always also
+        # trigger Tk's own bell() - whichever the user's system actually
+        # plays audibly wins. Any winsound failure is logged to the status
+        # line instead of being swallowed, since we can't test real Windows
+        # audio output from here. Runs in a thread since Beep() blocks for
+        # its duration and would otherwise freeze the UI.
         def play() -> None:
+            error = None
             try:
                 import winsound
                 winsound.Beep(880, 150)
                 winsound.Beep(1175, 180)
-            except (ImportError, RuntimeError, OSError):
-                self.after(0, self.bell)  # bell() must run on the Tk main thread
+            except Exception as exc:  # noqa: BLE001 - must never crash the alert
+                error = f"{type(exc).__name__}: {exc}"
+            self.after(0, self.bell)  # bell() must run on the Tk main thread
+            if error:
+                self.after(0, lambda: self._log(f"Alarm-Sound (winsound) fehlgeschlagen: {error}"))
 
         threading.Thread(target=play, daemon=True).start()
 
@@ -1631,7 +1646,10 @@ class App(tk.Tk):
         if band != BAND_FILTER_OPTIONS[0] and band_for_khz(spot.frequency_khz) != band:
             return False
         mode_filter = self.mode_filter_var.get()
-        if mode_filter != MODE_FILTER_OPTIONS[0] and mode_category(spot.mode) != mode_filter.lower():
+        if mode_filter == "CW & SSB":
+            if mode_category(spot.mode) not in ("cw", "ssb"):
+                return False
+        elif mode_filter != MODE_FILTER_OPTIONS[0] and mode_category(spot.mode) != mode_filter.lower():
             return False
         age_filter = self.age_filter_var.get()
         if age_filter != AGE_FILTER_OPTIONS[0]:

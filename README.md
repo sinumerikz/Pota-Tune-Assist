@@ -36,10 +36,11 @@ QRZ-Upload – alles in einer Oberfläche.
   und sortiert sie nach oben.
 - **Spot-Alarm** – Sound + kurzes Popup, sobald ein neuer Spot eines
   Favoriten oder Draußenfunkers erscheint, abschaltbar per Button.
-- **Filter** – Band-, Mode- und Alters-Dropdown (Alle/5/10/15 min blendet
-  ältere Spots aus), Freitext-Suchfeld sowie ein Mehrfachauswahl-Dialog für
-  Länder (mit Kontinent-Schnellwahl EU/NA/SA/AS/AF/OC); die Länderauswahl
-  bleibt über Neustarts hinweg erhalten. "Skip" blendet einzelne Spots aus,
+- **Filter** – Band-, Mode- (Alle/CW/SSB/**CW & SSB**/Digital) und
+  Alters-Dropdown (Alle/5/10/15 min blendet ältere Spots aus), Freitext-
+  Suchfeld sowie ein Mehrfachauswahl-Dialog für Länder (mit Kontinent-
+  Schnellwahl EU/NA/SA/AS/AF/OC); die Länderauswahl bleibt über Neustarts
+  hinweg erhalten. "Skip" blendet einzelne Spots aus,
   "Alle anzeigen" setzt das zurück.
 - **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, HEUTE,
   FREQ, MODE, REF, NAME, LOC, AGE) sortiert danach, erneuter Klick dreht
@@ -201,7 +202,13 @@ neu dazugekommen ist; beim allerersten Laden nach dem Programmstart wird
 nie gewarnt, auch wenn Favoriten/Draußenfunker da schon aktiv sind.
 Bereits ungültig gemeldete Spots lösen keinen Alarm aus. Der Button
 **"Alarm: An/Aus"** neben "Auto: An" schaltet die Funktion bei Bedarf
-komplett stumm.
+komplett stumm. **"Alarm testen"** löst Sound + Popup sofort einmal aus
+(auch bei "Alarm: Aus") – praktisch, um zu prüfen, ob der Ton auf dem
+eigenen System überhaupt zu hören ist, ohne auf einen echten Treffer zu
+warten. Der Ton wird über zwei Wege versucht (`winsound.Beep` plus der
+System-Klingelton), damit er möglichst unabhängig vom Windows-Soundschema
+funktioniert; schlägt `winsound` fehl, erscheint der Grund in der
+Statuszeile unten.
 
 ## TUNE-Versatz: automatisch nach Modus-Bandbreite
 
