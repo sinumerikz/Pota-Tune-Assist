@@ -2293,10 +2293,18 @@ class App(tk.Tk):
 
     def _check_for_update_async(self) -> None:
         if APP_BUILD_VERSION == "dev":
-            return  # not a CI build (patched at build time) - nothing reliable to compare
+            # Not a CI build - either running from source, or the build
+            # workflow's version-baking step didn't apply for some reason.
+            # Logged (not just silently skipped) so that second case is
+            # visible instead of looking exactly like "no update needed".
+            self.update_result_queue.put(
+                ("error", "übersprungen - APP_BUILD_VERSION ist 'dev' (kein CI-Build erkannt)")
+            )
+            return
         remote_version = check_remote_version()
         if not remote_version:
-            return  # unreachable / offline - stay quiet, this is a background nicety
+            self.update_result_queue.put(("error", "VERSION auf GitHub nicht erreichbar"))
+            return
         if APP_BUILD_VERSION == remote_version:
             self.update_result_queue.put(("uptodate", f"eigene Version {APP_BUILD_VERSION} = aktuell"))
             return
