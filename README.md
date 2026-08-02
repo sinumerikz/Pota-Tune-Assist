@@ -150,6 +150,11 @@ und während TUNE aktiv ist, verweigert der Button das Update. Läuft die App
 aus dem Quellcode (`python pota_tune_assist.py`) statt als .exe, ist diese
 Funktion inaktiv – dort per `git pull` aktualisieren.
 
+Das Hintergrund-Skript protokolliert seinen Ablauf in
+`pota_tune_assist_update.log` neben der .exe (wann gestartet, wann
+verschoben, wann neu gestartet) – hilfreich, falls der Neustart nach einem
+Update mal ausbleiben sollte.
+
 ### Aus dem Quellcode starten (Windows/Mac/Linux)
 
 ```bash

@@ -194,17 +194,32 @@ def download_new_exe(dest: Path) -> None:
 def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> Path:
     """A tiny helper script that waits for this process to actually exit
     (a running .exe can't overwrite itself), then swaps the downloaded
-    build into place, updates VERSION, relaunches, and deletes itself."""
+    build into place, updates VERSION, relaunches, and deletes itself.
+
+    Uses "ping -n 2 127.0.0.1" instead of "timeout" for the wait loop's
+    delay - timeout needs an interactive console input handle and fails
+    immediately when launched without a real console window (which is how
+    this script is started), silently aborting the whole update before it
+    ever reached move/start. A capped iteration count plus a log file
+    guard against the same kind of silent, undiagnosable failure."""
+    log_path = app_dir() / "pota_tune_assist_update.log"
     script = (
         "@echo off\r\n"
+        f'echo [%date% %time%] Update-Skript gestartet fuer PID {pid} > "{log_path}"\r\n'
+        "set COUNT=0\r\n"
         ":waitloop\r\n"
+        "set /a COUNT+=1\r\n"
+        "if %COUNT% GTR 30 goto forcemove\r\n"
         f'tasklist /FI "PID eq {pid}" 2>NUL | find "{pid}" >NUL\r\n'
         "if not errorlevel 1 (\r\n"
-        "  timeout /t 1 /nobreak >NUL\r\n"
+        "  ping -n 2 127.0.0.1 >NUL\r\n"
         "  goto waitloop\r\n"
         ")\r\n"
-        f'move /Y "{new_exe}" "{old_exe}" >NUL\r\n'
+        ":forcemove\r\n"
+        f'echo [%date% %time%] Verschiebe exe (Versuch nach %COUNT% Wartezyklen) >> "{log_path}"\r\n'
+        f'move /Y "{new_exe}" "{old_exe}" >> "{log_path}" 2>&1\r\n'
         f'> "{VERSION_PATH}" echo {version}\r\n'
+        f'echo [%date% %time%] Starte neu >> "{log_path}"\r\n'
         f'start "" "{old_exe}"\r\n'
         'del "%~f0"\r\n'
     )
@@ -2178,7 +2193,11 @@ class App(tk.Tk):
             return  # unreachable / offline - stay quiet, this is a background nicety
         local_version = read_local_version()
         if local_version and local_version == remote_version:
+            self.update_result_queue.put(("uptodate", f"lokal {local_version} = aktuell"))
             return
+        self.update_result_queue.put(
+            ("checking", f"lokal {local_version or '(keine VERSION-Datei)'} → verfügbar {remote_version}")
+        )
         new_exe_path = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
         try:
             download_new_exe(new_exe_path)
@@ -2206,9 +2225,15 @@ class App(tk.Tk):
         new_exe = app_dir() / f"{Path(EXE_NAME).stem}.exe.new"
         try:
             batch_path = write_update_batch(os.getpid(), old_exe, new_exe, self.pending_update_version)
+            # CREATE_NO_WINDOW alone (not combined with DETACHED_PROCESS -
+            # those two are contradictory: DETACHED_PROCESS means "no
+            # console at all", which breaks console-dependent commands
+            # like `timeout`/`ping` inside the batch script and made the
+            # whole update silently never run). CREATE_NEW_PROCESS_GROUP
+            # detaches it from our process so it survives after we exit.
             subprocess.Popen(
                 ["cmd", "/c", str(batch_path)],
-                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.DETACHED_PROCESS,
+                creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP,
                 close_fds=True,
             )
         except OSError as exc:
@@ -2661,6 +2686,10 @@ class App(tk.Tk):
                         f"Update bereit: Version {payload} heruntergeladen - "
                         "'🔄 Update installieren' klicken, um zu übernehmen."
                     )
+                elif kind == "uptodate":
+                    self._log(f"Update-Check: {payload}, kein Download nötig.")
+                elif kind == "checking":
+                    self._log(f"Update-Check: {payload} - lade im Hintergrund herunter...")
                 else:
                     self._log(f"Update-Check fehlgeschlagen: {payload}")
         except queue.Empty:
