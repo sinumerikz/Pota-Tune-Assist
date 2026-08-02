@@ -217,8 +217,28 @@ def write_update_batch(pid: int, old_exe: Path, new_exe: Path, version: str) -> 
         ")\r\n"
         ":forcemove\r\n"
         f'echo [%date% %time%] Verschiebe exe (Versuch nach %COUNT% Wartezyklen) >> "{log_path}"\r\n'
+        "set MOVECOUNT=0\r\n"
+        ":moveloop\r\n"
+        "set /a MOVECOUNT+=1\r\n"
         f'move /Y "{new_exe}" "{old_exe}" >> "{log_path}" 2>&1\r\n'
+        # move deletes the source on success - if it's still there, the
+        # move failed (observed cause: the just-exited .exe's file handle
+        # / antivirus scan can hold a brief lock past process exit, per
+        # the "failed to remove temp directory" warning PyInstaller's
+        # onefile bootloader shows in that situation) - retry with a
+        # short backoff instead of giving up after a single attempt.
+        f'if exist "{new_exe}" (\r\n'
+        "  if %MOVECOUNT% GEQ 15 (\r\n"
+        f'    echo [%date% %time%] Verschieben nach %MOVECOUNT% Versuchen aufgegeben >> "{log_path}"\r\n'
+        "    goto relaunch\r\n"
+        "  )\r\n"
+        f'  echo [%date% %time%] Verschieben fehlgeschlagen, wiederhole (Versuch %MOVECOUNT%) >> "{log_path}"\r\n'
+        "  ping -n 2 127.0.0.1 >NUL\r\n"
+        "  goto moveloop\r\n"
+        ")\r\n"
+        f'echo [%date% %time%] Verschieben erfolgreich nach %MOVECOUNT% Versuch(en) >> "{log_path}"\r\n'
         f'> "{VERSION_PATH}" echo {version}\r\n'
+        ":relaunch\r\n"
         f'echo [%date% %time%] Starte neu >> "{log_path}"\r\n'
         f'start "" "{old_exe}"\r\n'
         'del "%~f0"\r\n'

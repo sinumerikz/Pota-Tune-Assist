@@ -133,9 +133,13 @@ Zeilen für bereits geloggte Kontakte).
 kein Python nötig, einfach starten. Sie wird automatisch per GitHub-Actions-
 Workflow (`.github/workflows/build-windows-exe.yml`) auf einem echten
 `windows-latest`-Runner gebaut und bei Änderungen an `pota_tune_assist.py`
-oder `requirements.txt` auf `main` neu committet, nicht von Hand. Windows
-SmartScreen warnt bei unsignierten .exe-Dateien aus dem Internet – das ist
-bei selbst gebauten PyInstaller-Programmen normal.
+oder `requirements.txt` auf `main` neu committet, nicht von Hand. Der
+Workflow baut vor der eigentlichen .exe einen zweiten, identischen
+Konsolen-Build nur zum Testen und startet ihn kurz – bricht die App dabei
+sofort ab (z. B. fehlende Tcl/Tk-DLLs im Build), wird nichts committet,
+damit kein kaputter Build im Repo landet. Windows SmartScreen warnt bei
+unsignierten .exe-Dateien aus dem Internet – das ist bei selbst gebauten
+PyInstaller-Programmen normal.
 
 **Automatische Update-Prüfung:** Die .exe vergleicht bei jedem Start ihre
 lokale `VERSION`-Datei (liegt neben der .exe, wird vom Build-Workflow
@@ -153,7 +157,10 @@ Funktion inaktiv – dort per `git pull` aktualisieren.
 Das Hintergrund-Skript protokolliert seinen Ablauf in
 `pota_tune_assist_update.log` neben der .exe (wann gestartet, wann
 verschoben, wann neu gestartet) – hilfreich, falls der Neustart nach einem
-Update mal ausbleiben sollte.
+Update mal ausbleiben sollte. Ist die alte .exe direkt nach dem Beenden
+noch kurz von Windows gesperrt (z. B. Antivirus-Scan), wiederholt das
+Skript das Verschieben automatisch bis zu 15× mit kurzer Pause, bevor es
+aufgibt.
 
 ### Aus dem Quellcode starten (Windows/Mac/Linux)
 

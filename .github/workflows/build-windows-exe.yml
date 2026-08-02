@@ -34,7 +34,37 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller
+          pip install "pyinstaller>=6.6,<7"
+
+      # Console build purely for the smoke test below - a --windowed exe
+      # shows an unhandled exception as a blocking dialog (no stderr to
+      # read from CI), a console build prints the traceback and exits
+      # with a non-zero code instead, which is scriptable. Same source,
+      # same deps, so it reproduces packaging issues (e.g. missing Tcl/Tk
+      # DLLs) identically to the real build.
+      - name: Build smoke-test exe (console)
+        run: pyinstaller --onefile --name "POTA-Tune-Assist-smoketest" pota_tune_assist.py
+
+      - name: Smoke-test the build
+        shell: pwsh
+        run: |
+          $psi = New-Object System.Diagnostics.ProcessStartInfo
+          $psi.FileName = "dist\POTA-Tune-Assist-smoketest.exe"
+          $psi.RedirectStandardError = $true
+          $psi.RedirectStandardOutput = $true
+          $psi.UseShellExecute = $false
+          $proc = [System.Diagnostics.Process]::Start($psi)
+          Start-Sleep -Seconds 6
+          if ($proc.HasExited) {
+            Write-Host "---STDOUT---"
+            Write-Host $proc.StandardOutput.ReadToEnd()
+            Write-Host "---STDERR---"
+            Write-Host $proc.StandardError.ReadToEnd()
+            Write-Error "Smoke test FAILED: app exited immediately (exit code $($proc.ExitCode)). Build will NOT be committed."
+            exit 1
+          }
+          Write-Host "Smoke test passed: app stayed running for 6s (no startup crash)."
+          Stop-Process -Id $proc.Id -Force
 
       - name: Build exe
         run: pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
