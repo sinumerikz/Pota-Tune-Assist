@@ -31,6 +31,11 @@ QRZ-Upload – alles in einer Oberfläche.
 - **Favoriten** – ☆-Stern neben einem Spot markiert ein Rufzeichen dauerhaft
   als Favorit; favorisierte Spots erscheinen immer oben in der Liste und
   sind farblich hervorgehoben, egal wie sortiert oder gefiltert wird.
+- **Draußenfunker-Liste** – lädt beim Start automatisch eine Rufzeichen-
+  Watchlist herunter und hebt Spots davon (🏕) ähnlich wie Favoriten hervor
+  und sortiert sie nach oben.
+- **Spot-Alarm** – Sound + kurzes Popup, sobald ein neuer Spot eines
+  Favoriten oder Draußenfunkers erscheint, abschaltbar per Button.
 - **Filter** – Band- und Mode-Dropdown, Freitext-Suchfeld sowie ein
   Mehrfachauswahl-Dialog für Länder (mit Kontinent-Schnellwahl EU/NA/SA/
   AS/AF/OC); die Länderauswahl bleibt über Neustarts hinweg erhalten.
@@ -178,6 +183,20 @@ Zeile in der Tabelle die **🏕-Markierung** in der Spalte links neben
 Unterscheidung von den goldenen ⭐-Favoriten) und wird – wie Favoriten –
 automatisch nach oben in der Liste einsortiert (Favoriten zuerst, danach
 Draußenfunker-Treffer, danach der Rest).
+
+### Spot-Alarm (Sound + Popup)
+
+Erscheint beim automatischen Refresh (alle 60 s) ein **neuer** Spot eines
+⭐-Favoriten oder eines 🏕-Draußenfunkers, spielt die App einen Signalton
+und zeigt oben rechts ein kurzes, sich nach 7 Sekunden selbst
+schließendes Popup mit Rufzeichen, Frequenz, Mode und POTA-Referenz –
+so verpasst man den Spot nicht, obwohl man nicht ständig auf die Tabelle
+schauen muss. Als "neu" zählt dabei nur, was seit dem letzten Refresh
+neu dazugekommen ist; beim allerersten Laden nach dem Programmstart wird
+nie gewarnt, auch wenn Favoriten/Draußenfunker da schon aktiv sind.
+Bereits ungültig gemeldete Spots lösen keinen Alarm aus. Der Button
+**"Alarm: An/Aus"** neben "Auto: An" schaltet die Funktion bei Bedarf
+komplett stumm.
 
 ## TUNE-Versatz: automatisch nach Modus-Bandbreite
 

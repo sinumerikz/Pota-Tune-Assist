@@ -944,6 +944,9 @@ class App(tk.Tk):
         self.logged_spot_ids: set[int] = set()
         self.worked_today_index: dict[str, list[dict[str, str]]] = {}
         self.auto_refresh = True
+        self.priority_alert_enabled = True
+        self.known_spot_ids: set[int] | None = None
+        self._alert_toasts: list[tk.Toplevel] = []
         self.spot_result_queue: queue.Queue = queue.Queue()
         self.log_result_queue: queue.Queue = queue.Queue()
         self.outdoor_result_queue: queue.Queue = queue.Queue()
@@ -1066,6 +1069,8 @@ class App(tk.Tk):
         _chip_button(filter_row, "Refresh", command=self._request_spot_refresh).pack(side="left", padx=4)
         self.scan_btn = _chip_button(filter_row, "Auto: An", command=self._toggle_auto_refresh)
         self.scan_btn.pack(side="left", padx=4)
+        self.alert_btn = _chip_button(filter_row, "Alarm: An", command=self._toggle_priority_alert)
+        self.alert_btn.pack(side="left", padx=4)
         _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
@@ -1493,6 +1498,13 @@ class App(tk.Tk):
             fg=COL_ACCENT if self.auto_refresh else COL_MUTED,
         )
 
+    def _toggle_priority_alert(self) -> None:
+        self.priority_alert_enabled = not self.priority_alert_enabled
+        self.alert_btn.configure(
+            text="Alarm: An" if self.priority_alert_enabled else "Alarm: Aus",
+            fg=COL_ACCENT if self.priority_alert_enabled else COL_MUTED,
+        )
+
     def _unskip_all(self) -> None:
         self.skipped_ids.clear()
         self._render_spots()
@@ -1509,6 +1521,67 @@ class App(tk.Tk):
 
     def _load_outdoor_calls_async(self) -> None:
         self.outdoor_result_queue.put(load_outdoor_calls())
+
+    def _check_new_priority_spots(self, new_spots: list["Spot"]) -> None:
+        """Alerts (sound + toast) on favorites/Draussenfunker spots that
+        weren't in the previous poll - never on the first poll after
+        startup, since every spot on air at that point is "new" to us but
+        not actually a fresh spot."""
+        new_ids = {s.spot_id for s in new_spots}
+        if self.known_spot_ids is not None and self.priority_alert_enabled:
+            fresh_ids = new_ids - self.known_spot_ids
+            hits = [
+                s for s in new_spots
+                if s.spot_id in fresh_ids and not s.invalid
+                and (self._is_favorite(s) or self._is_outdoor(s))
+            ]
+            if hits:
+                self._alert_priority_spots(hits)
+        self.known_spot_ids = new_ids
+
+    def _alert_priority_spots(self, hits: list["Spot"]) -> None:
+        self._play_alert_sound()
+        lines = []
+        for s in hits:
+            icon = "⭐" if self._is_favorite(s) else "🏕"
+            lines.append(f"{icon} {s.activator}  {s.frequency_khz:.1f} kHz {s.mode}  {s.reference}")
+        self._show_alert_toast(lines)
+        self._log(f"Alarm: {len(hits)}× Favorit/Draußenfunker neu gespottet.")
+
+    def _play_alert_sound(self) -> None:
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except (ImportError, RuntimeError):
+            self.bell()
+
+    def _show_alert_toast(self, lines: list[str]) -> None:
+        toast = tk.Toplevel(self)
+        toast.overrideredirect(True)
+        toast.attributes("-topmost", True)
+        toast.configure(bg=COL_ACCENT)
+        inner = tk.Frame(toast, bg=COL_PANEL, padx=14, pady=10)
+        inner.pack(padx=2, pady=2)
+        tk.Label(inner, text="🔔 Spot-Alarm", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        for line in lines:
+            tk.Label(inner, text=line, fg=COL_TEXT, bg=COL_PANEL,
+                     font=("Segoe UI", 9), justify="left").pack(anchor="w", pady=(2, 0))
+
+        self._alert_toasts.append(toast)
+
+        def close() -> None:
+            if toast in self._alert_toasts:
+                self._alert_toasts.remove(toast)
+            toast.destroy()
+
+        toast.update_idletasks()
+        offset = 40 + 90 * (len(self._alert_toasts) - 1)
+        x = self.winfo_x() + self.winfo_width() - toast.winfo_width() - 24
+        y = self.winfo_y() + offset
+        toast.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        toast.bind("<Button-1>", lambda _e: close())
+        toast.after(7000, close)
 
     # -- table rendering ----------------------------------------------------------
 
@@ -1962,6 +2035,7 @@ class App(tk.Tk):
             while True:
                 kind, payload = self.spot_result_queue.get_nowait()
                 if kind == "ok":
+                    self._check_new_priority_spots(payload)
                     self.spots = payload
                     self._update_country_options()
                     self._render_spots()
