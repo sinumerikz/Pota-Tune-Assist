@@ -55,6 +55,10 @@ QRZ-Upload – alles in einer Oberfläche.
   aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
   beim FT-710-CAT-Backend), hilfreich bei Frequenz-/Mode-Problemen.
+- **Programm-Log** – Debug-Fenster mit dem Verlauf aller Programmereignisse
+  und Fehler (Verbindungsauf-/-abbau, Spot-Abruf, QRZ-/Wavelog-Uploads,
+  interne Fehler), im Gegensatz zur einzeiligen Statuszeile bleibt hier der
+  Verlauf der letzten 500 Meldungen sichtbar.
 - **Zuverlässige CAT-Kommunikation** – Frequenz- und Mode-Befehle werden bei
   QSY, TUNE-Start und TUNE-Ende doppelt gesendet und per Rücklese-Abfrage
   geprüft, bei Abweichung bis zu zweimal wiederholt; der Mode wird dabei
@@ -202,7 +206,10 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    `pota_tune_assist_config.json` gespeichert und bleibt über Neustarts hinweg
    erhalten. "Skip" blendet einzelne Spots aus, "Alle anzeigen" setzt das
    zurück. **"CAT-Log"** öffnet ein Debug-Fenster mit den rohen
-   CAT-Befehlen/-Antworten (nur FT-710-CAT-Backend).
+   CAT-Befehlen/-Antworten (nur FT-710-CAT-Backend). **"Programm-Log"**
+   öffnet ein Debug-Fenster mit dem Verlauf aller Programmereignisse und
+   Fehler (Verbindung, Spots, Uploads, interne Fehler) – nützlich, wenn z. B.
+   Spots oder Sonnendaten plötzlich stehen bleiben.
 3. Klick auf **▶ QSY** (oder Doppelklick auf die Zeile) → Funkgerät QSYt
    automatisch auf Frequenz + Mode des Spots. Als ungültig gemeldete Spots
    werden rot durchgestrichen dargestellt, bleiben aber anklickbar. Der

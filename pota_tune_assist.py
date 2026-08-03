@@ -1230,6 +1230,12 @@ def apply_dark_titlebar(window) -> None:
         return
     try:
         import ctypes
+        # The real top-level HWND that Windows/DWM draws the title bar for
+        # only exists once Tk has actually realized the window - calling
+        # this immediately after creating the widget (before it's mapped)
+        # gets HWND 0 and DWM silently ignores the call, leaving the title
+        # bar white. update_idletasks() forces realization first.
+        window.update_idletasks()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
         DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(1)
@@ -1265,6 +1271,10 @@ class App(tk.Tk):
         self.minsize(1180, 560)
         self.configure(bg=COL_BG)
         apply_dark_titlebar(self)
+        # Some Windows builds only pick up the DWM attribute once the window
+        # is actually mapped on screen - a second call shortly after start
+        # (harmless no-op if the first one already worked) catches those.
+        self.after(150, lambda: apply_dark_titlebar(self))
 
         self._init_style()
 
@@ -1280,6 +1290,7 @@ class App(tk.Tk):
         self._alert_toasts: list[tk.Toplevel] = []
         self.spot_result_queue: queue.Queue = queue.Queue()
         self.log_result_queue: queue.Queue = queue.Queue()
+        self.app_log_lines: list[str] = []
         self.outdoor_result_queue: queue.Queue = queue.Queue()
         self.stop_poll_event = threading.Event()
 
@@ -1450,6 +1461,7 @@ class App(tk.Tk):
         _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
+        _chip_button(filter_row, "Programm-Log", command=self._open_program_log).pack(side="left", padx=4)
 
         # -- table -----------------------------------------------------------
         table_frame = tk.Frame(self, bg=COL_BG)
@@ -1868,11 +1880,55 @@ class App(tk.Tk):
 
         refresh()
 
+    def _open_program_log(self) -> None:
+        dlg = tk.Toplevel(self, bg=COL_PANEL)
+        dlg.title("Programm-Log")
+        dlg.geometry("720x460")
+        dlg.configure(bg=COL_PANEL)
+        apply_dark_titlebar(dlg)
+        dlg.transient(self)
+
+        tk.Label(
+            dlg, text="Programmereignisse und Fehler (Verbindung, Spots, Uploads, "
+            "interne Fehler) - neueste Zeile unten.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 8), justify="left", wraplength=690,
+        ).pack(anchor="w", padx=10, pady=(10, 4))
+
+        text = tk.Text(
+            dlg, bg=COL_PANEL_ALT, fg=COL_TEXT, insertbackground=COL_TEXT,
+            font=("Consolas", 9), wrap="word", relief="flat", bd=0,
+        )
+        text.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        def refresh() -> None:
+            text.configure(state="normal")
+            text.delete("1.0", "end")
+            if not self.app_log_lines:
+                text.insert("end", "Noch keine Ereignisse aufgezeichnet.")
+            else:
+                text.insert("end", "\n".join(self.app_log_lines))
+                text.see("end")
+            text.configure(state="disabled")
+
+        btn_row = tk.Frame(dlg, bg=COL_PANEL)
+        btn_row.pack(fill="x", padx=10, pady=(0, 10))
+        _chip_button(btn_row, "Aktualisieren", command=refresh).pack(side="left")
+        _chip_button(
+            btn_row, "Leeren",
+            command=lambda: (self.app_log_lines.clear(), refresh()),
+        ).pack(side="left", padx=6)
+
+        refresh()
+
     # -- logging / status ----------------------------------------------------
 
     def _log(self, message: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self.status_var.set(f"[{ts}] {message}")
+        line = f"[{ts}] {message}"
+        self.status_var.set(line)
+        self.app_log_lines.append(line)
+        if len(self.app_log_lines) > 500:
+            del self.app_log_lines[: len(self.app_log_lines) - 500]
 
     # -- serial connection ----------------------------------------------------
 
@@ -1970,7 +2026,8 @@ class App(tk.Tk):
         self.conn_status_var.set(status)
         for line in log_lines:
             self._log(line)
-        self.connect_btn.configure(text="Trennen")
+        if hasattr(self, "connect_btn"):
+            self.connect_btn.configure(text="Trennen")
         self.cat_badge.configure(bg=COL_GREEN)
         self._save_connection_settings()
         self.reconnect_backoff_seconds = RECONNECT_BACKOFF_INITIAL_SECONDS
@@ -2806,6 +2863,16 @@ class App(tk.Tk):
 
     def _tick(self) -> None:
         try:
+            self._tick_body()
+        except Exception as exc:
+            # Any uncaught exception here would otherwise stop the
+            # self.after() reschedule below, silently freezing spots,
+            # solar data and CAT status updates for the rest of the run.
+            self._log(f"Interner Fehler in der Aktualisierungsschleife: {exc}")
+        self.after(200, self._tick)
+
+    def _tick_body(self) -> None:
+        try:
             while True:
                 kind, payload = self.spot_result_queue.get_nowait()
                 if kind == "ok":
@@ -2885,7 +2952,8 @@ class App(tk.Tk):
                     if self.rigctld_process.running:
                         self.rigctld_process.stop()
                     self.conn_status_var.set("Verbindung verloren - versuche automatisch neu zu verbinden…")
-                    self.connect_btn.configure(text="Verbinden")
+                    if hasattr(self, "connect_btn"):
+                        self.connect_btn.configure(text="Verbinden")
                     self.cat_badge.configure(bg=COL_RED)
                     self._log("CAT-Verbindung verloren, versuche automatisch neu zu verbinden.")
                 elif kind == "ok":
@@ -2898,8 +2966,6 @@ class App(tk.Tk):
             self.tune.stop()
             self.tune_btn.configure(text="TUNE (halten)", bg=COL_AMBER, fg="#1a1200")
             self._log("Sicherheits-Timeout erreicht, TUNE automatisch beendet.")
-
-        self.after(200, self._tick)
 
     def destroy(self) -> None:
         self.stop_poll_event.set()
