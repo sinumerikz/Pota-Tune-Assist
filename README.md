@@ -335,7 +335,9 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    Wavelog-Instanzen), **API-Key** (Wavelog → Settings → API Keys) und
    **Station-Profil-ID** (Wavelog → Station Setup, meist `1` bei nur einem
    Profil) eintragen. Erst wenn alle drei Felder ausgefüllt sind, wird
-   zusätzlich zu Wavelog hochgeladen.
+   zusätzlich zu Wavelog hochgeladen. Der API-Key muss in Wavelog als
+   **"read/write"** angelegt sein – ein "read-only"-Key liefert beim Upload
+   `401 Unauthorized`.
 3. In der Spot-Tabelle auf **📝 Log** in der gewünschten Zeile klicken. Der
    Dialog ist mit Rufzeichen, aktuellem UTC-Datum/-Zeit, Band, Frequenz,
    Mode (aus dem Spot) sowie der POTA-Referenz als `SIG_INFO` vorausgefüllt

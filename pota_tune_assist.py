@@ -305,8 +305,19 @@ def upload_to_wavelog(base_url: str, api_key: str, station_profile_id: str, adif
             "type": "adif",
             "string": adif_record,
         },
+        headers={"Accept": "application/json"},
         timeout=10,
     )
+    if resp.status_code in (401, 403):
+        # Wavelog rejects here for two config reasons, not app bugs: the API
+        # key must be a "read/write" key (a "read-only" one 401s on POST),
+        # and station_profile_id must belong to the same Wavelog account
+        # that issued the key.
+        return False, (
+            f"HTTP {resp.status_code} - API-Key prüfen (muss in Wavelog unter "
+            "Settings -> API Keys als 'read/write' angelegt sein, nicht "
+            "'read-only') und ob die Station-Profil-ID zu diesem Key gehört."
+        )
     resp.raise_for_status()
     try:
         data = resp.json()
