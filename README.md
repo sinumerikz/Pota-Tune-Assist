@@ -132,7 +132,12 @@ Zeilen für als ungültig gemeldete Spots, gedämpft grün durchgestrichene
 Zeilen für bereits geloggte Kontakte). Unter Windows 10 (2004+)/11 wird
 zusätzlich auch die native Fenster-Titelleiste (Haupt- und alle
 Dialogfenster) per DWM-API dunkel eingefärbt statt im Standard-Weiß von
-Windows zu bleiben.
+Windows zu bleiben (benötigt Windows 10 Version 2004/20H1 oder neuer bzw.
+Windows 11 - auf älteren Windows-Versionen bleibt sie weiß, dazu erscheint
+ein Hinweis im Programm-Log).
+
+Das **Settings**-Fenster scrollt (Mausrad oder Scrollbar rechts), falls der
+Inhalt nicht auf einmal auf den Bildschirm passt.
 
 ## Installation
 

@@ -1219,31 +1219,43 @@ COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
 
 
-def apply_dark_titlebar(window) -> None:
+def apply_dark_titlebar(window) -> bool:
     """Windows 10 (2004+)/11 only: switches the *native* window title bar
     to dark mode via DWM. Tkinter has no theme hook for the OS-drawn
     title bar - it stays white/light regardless of the app's own colors
     unless a program explicitly opts in through this Win32 API. No-op
     (silently) on anything else, including older Windows without this
-    DWM attribute."""
+    DWM attribute. Returns True if DWM confirmed the change, False if it
+    was rejected (older Windows) or this isn't Windows at all - the caller
+    can use that to tell the difference between "worked" and "unsupported"
+    instead of assuming success."""
     if sys.platform != "win32":
-        return
+        return False
     try:
         import ctypes
         # The real top-level HWND that Windows/DWM draws the title bar for
         # only exists once Tk has actually realized the window - calling
         # this immediately after creating the widget (before it's mapped)
         # gets HWND 0 and DWM silently ignores the call, leaving the title
-        # bar white. update_idletasks() forces realization first.
-        window.update_idletasks()
+        # bar white. update() forces full realization first.
+        window.update()
         hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-        DWMWA_USE_IMMERSIVE_DARK_MODE = 20
         value = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(
-            hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ctypes.byref(value), ctypes.sizeof(value),
-        )
+        # 20 = official DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 10 20H1+/11).
+        # 19 = same attribute on Windows 10 1809-1909 insider builds that
+        # shipped it under a different, later-renumbered ID. Neither call
+        # raises on failure (DwmSetWindowAttribute just returns a non-zero
+        # HRESULT), so the return value - not an exception - is what tells
+        # us whether it actually took effect.
+        for attr in (20, 19):
+            hr = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, attr, ctypes.byref(value), ctypes.sizeof(value),
+            )
+            if hr == 0:
+                return True
+        return False
     except (OSError, AttributeError):
-        pass
+        return False
 
 
 def _chip_button(parent, text, command=None, **kw):
@@ -1270,11 +1282,11 @@ class App(tk.Tk):
         self.geometry("1320x680")
         self.minsize(1180, 560)
         self.configure(bg=COL_BG)
-        apply_dark_titlebar(self)
+        self._dark_titlebar_ok = apply_dark_titlebar(self)
         # Some Windows builds only pick up the DWM attribute once the window
         # is actually mapped on screen - a second call shortly after start
         # (harmless no-op if the first one already worked) catches those.
-        self.after(150, lambda: apply_dark_titlebar(self))
+        self.after(150, self._retry_dark_titlebar)
 
         self._init_style()
 
@@ -1580,10 +1592,32 @@ class App(tk.Tk):
     def _open_settings(self) -> None:
         dlg = tk.Toplevel(self, bg=COL_PANEL)
         dlg.title("Settings")
-        dlg.geometry("420x600")
+        dlg.geometry("460x640")
+        dlg.minsize(440, 320)
         dlg.configure(bg=COL_PANEL)
         apply_dark_titlebar(dlg)
         dlg.transient(self)
+
+        # Scrollable body - the settings content is taller than most screens
+        # allow for a fixed-size dialog, so it lives in a canvas+scrollbar
+        # instead of being packed directly into dlg (which just clipped the
+        # bottom of the dialog with no way to reach it).
+        canvas = tk.Canvas(dlg, bg=COL_PANEL, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+        content = tk.Frame(canvas, bg=COL_PANEL)
+        content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        content_window = canvas.create_window((0, 0), window=content, anchor="nw")
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(content_window, width=e.width))
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def _on_mousewheel(event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
+        dlg.bind("<Destroy>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
         def row(parent, label):
             r = tk.Frame(parent, bg=COL_PANEL)
@@ -1592,17 +1626,17 @@ class App(tk.Tk):
                      font=("Segoe UI", 9)).pack(side="left")
             return r
 
-        tk.Label(dlg, text="Funkgerät", fg=COL_ACCENT, bg=COL_PANEL,
+        tk.Label(content, text="Funkgerät", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(10, 0))
 
-        backend_row = row(dlg, "Backend")
+        backend_row = row(content, "Backend")
         backend_combo = ttk.Combobox(
             backend_row, textvariable=self.backend_display_var, style="Dark.TCombobox",
             values=list(BACKEND_DISPLAY_TO_KEY.keys()), width=22, state="readonly",
         )
         backend_combo.pack(side="left")
 
-        param_frame = tk.Frame(dlg, bg=COL_PANEL)
+        param_frame = tk.Frame(content, bg=COL_PANEL)
         param_frame.pack(fill="x")
 
         serial_frame = tk.Frame(param_frame, bg=COL_PANEL)
@@ -1695,55 +1729,55 @@ class App(tk.Tk):
         sync_frames()
 
         self.connect_btn = _chip_button(
-            dlg, "Trennen" if self.cat.connected else "Verbinden", command=self._toggle_connect,
+            content, "Trennen" if self.cat.connected else "Verbinden", command=self._toggle_connect,
         )
         self.connect_btn.pack(padx=14, pady=(10, 4), fill="x")
 
-        tk.Label(dlg, textvariable=self.conn_status_var, fg=COL_MUTED, bg=COL_PANEL,
+        tk.Label(content, textvariable=self.conn_status_var, fg=COL_MUTED, bg=COL_PANEL,
                  font=("Segoe UI", 8)).pack(padx=14, pady=(0, 10))
 
-        ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
 
-        tk.Label(dlg, text="Log / QRZ Logbook", fg=COL_ACCENT, bg=COL_PANEL,
+        tk.Label(content, text="Log / QRZ Logbook", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
 
-        call_row = row(dlg, "Eig. Rufzeichen")
+        call_row = row(content, "Eig. Rufzeichen")
         ttk.Entry(call_row, textvariable=self.my_callsign_var, style="Dark.TEntry", width=16).pack(side="left")
 
-        grid_row = row(dlg, "Eig. Locator")
+        grid_row = row(content, "Eig. Locator")
         ttk.Entry(grid_row, textvariable=self.my_grid_var, style="Dark.TEntry", width=16).pack(side="left")
 
-        qrz_row = row(dlg, "QRZ API-Key")
+        qrz_row = row(content, "QRZ API-Key")
         ttk.Entry(qrz_row, textvariable=self.qrz_api_key_var, style="Dark.TEntry", width=28, show="•").pack(side="left")
 
         tk.Label(
-            dlg, text="QRZ-Logbook-API-Key aus dem QRZ-Logbook (Settings -> API Key).\n"
+            content, text="QRZ-Logbook-API-Key aus dem QRZ-Logbook (Settings -> API Key).\n"
                       "Leer lassen, um nicht zu QRZ hochzuladen.",
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
-        ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
 
-        tk.Label(dlg, text="Wavelog", fg=COL_ACCENT, bg=COL_PANEL,
+        tk.Label(content, text="Wavelog", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
 
-        wavelog_url_row = row(dlg, "Server-URL")
+        wavelog_url_row = row(content, "Server-URL")
         ttk.Entry(
             wavelog_url_row, textvariable=self.wavelog_url_var, style="Dark.TEntry", width=28,
         ).pack(side="left")
 
-        wavelog_key_row = row(dlg, "API-Key")
+        wavelog_key_row = row(content, "API-Key")
         ttk.Entry(
             wavelog_key_row, textvariable=self.wavelog_api_key_var, style="Dark.TEntry", width=28, show="•",
         ).pack(side="left")
 
-        wavelog_station_row = row(dlg, "Station-Profil-ID")
+        wavelog_station_row = row(content, "Station-Profil-ID")
         ttk.Entry(
             wavelog_station_row, textvariable=self.wavelog_station_id_var, style="Dark.TEntry", width=10,
         ).pack(side="left")
 
         tk.Label(
-            dlg, text="Eigene Wavelog-Instanz (z. B. https://log.example.com, ohne\n"
+            content, text="Eigene Wavelog-Instanz (z. B. https://log.example.com, ohne\n"
                       "abschließenden Slash) - API-Key unter Settings -> API Keys im\n"
                       "Wavelog erzeugen. Station-Profil-ID steht in Wavelog unter Station\n"
                       "Setup (meist \"1\" bei nur einem Profil). Alle drei Felder nötig, sonst\n"
@@ -1751,21 +1785,21 @@ class App(tk.Tk):
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
-        ttk.Separator(dlg, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
 
-        tk.Label(dlg, text="QRZ XML-Lookup (Entfernung zum Aktivator)", fg=COL_ACCENT, bg=COL_PANEL,
+        tk.Label(content, text="QRZ XML-Lookup (Entfernung zum Aktivator)", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
 
-        qrz_xml_user_row = row(dlg, "QRZ-Benutzer")
+        qrz_xml_user_row = row(content, "QRZ-Benutzer")
         ttk.Entry(qrz_xml_user_row, textvariable=self.qrz_xml_user_var, style="Dark.TEntry", width=20).pack(side="left")
 
-        qrz_xml_pass_row = row(dlg, "QRZ-Passwort")
+        qrz_xml_pass_row = row(content, "QRZ-Passwort")
         ttk.Entry(
             qrz_xml_pass_row, textvariable=self.qrz_xml_pass_var, style="Dark.TEntry", width=20, show="•",
         ).pack(side="left")
 
         tk.Label(
-            dlg, text="Eigener QRZ.com-Login (nicht der Logbook-API-Key oben) - nötig für\n"
+            content, text="Eigener QRZ.com-Login (nicht der Logbook-API-Key oben) - nötig für\n"
                       "die kostenpflichtige XML-Lookup-Funktion. Nur mit eingetragenem\n"
                       "'Eig. Locator' oben und beiden Feldern hier erscheint die KM-Spalte\n"
                       "in der Spot-Liste und wird pro Spot automatisch abgefragt. Leer\n"
@@ -1773,7 +1807,7 @@ class App(tk.Tk):
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
-        _chip_button(dlg, "Speichern", command=self._save_log_settings).pack(padx=14, pady=(0, 10), fill="x")
+        _chip_button(content, "Speichern", command=self._save_log_settings).pack(padx=14, pady=(0, 10), fill="x")
 
     def _save_log_settings(self) -> None:
         save_config({
@@ -2860,6 +2894,16 @@ class App(tk.Tk):
     def _tick_clock(self) -> None:
         self.clock_var.set(datetime.now(timezone.utc).strftime("%H:%M:%Sz"))
         self.after(1000, self._tick_clock)
+
+    def _retry_dark_titlebar(self) -> None:
+        if not self._dark_titlebar_ok:
+            self._dark_titlebar_ok = apply_dark_titlebar(self)
+        if sys.platform == "win32" and not self._dark_titlebar_ok:
+            self._log(
+                "Hinweis: Windows hat die dunkle Titelleiste nicht übernommen "
+                "(von DWM abgelehnt) - dafür wird Windows 10 Version 2004/20H1 "
+                "oder neuer bzw. Windows 11 benötigt."
+            )
 
     def _tick(self) -> None:
         try:
