@@ -66,9 +66,14 @@ import serial
 import serial.tools.list_ports
 
 POTA_SPOTS_URL = "https://api.pota.app/spot/activator"
+POTA_SPOT_POST_URL = "https://api.pota.app/spot/"
 POTA_POLL_SECONDS_DEFAULT = 60
 WORKED_TODAY_REFRESH_SECONDS = 60
 QRZ_LOGBOOK_API_URL = "https://logbook.qrz.com/api"
+
+# Default respot comment template, filled in via render_respot_comment().
+# Placeholders: {call} {mycall} {rst_sent} {rst_rcvd} {freq} {mode} {ref}
+RESPOT_TEMPLATE_DEFAULT = "Tnx fer QSO ({rst_sent}/{rst_rcvd}) 73 es {mycall}"
 
 # Solar/propagation indices (N0NBH's widely-used ham radio solar data feed,
 # free, no API key). SFI/K/A come from here; MUF is preferentially replaced
@@ -327,6 +332,51 @@ def upload_to_wavelog(base_url: str, api_key: str, station_profile_id: str, adif
     if status in ("created", "success", "ok"):
         return True, status or "ok"
     return False, str(data.get("reason") or data.get("message") or data)
+
+
+def post_pota_spot(
+    activator: str, spotter: str, frequency_khz: float, mode: str, reference: str, comments: str,
+) -> tuple[bool, str]:
+    """POST a spot to the public POTA spot network (same endpoint pota.app's
+    own site and hunter tools like hunterlog use to (re-)spot an activator,
+    e.g. right after logging them, so other hunters know they're still on
+    frequency). frequency is in kHz, matching the units POTA_SPOTS_URL's GET
+    response already uses elsewhere in this file (see fetch_pota_spots())."""
+    resp = requests.post(
+        POTA_SPOT_POST_URL,
+        json={
+            "activator": activator,
+            "spotter": spotter,
+            "frequency": f"{frequency_khz:.2f}",
+            "reference": reference,
+            "mode": mode,
+            "source": "POTA-TuneAssist",
+            "comments": comments,
+        },
+        headers={"Content-Type": "application/json", "origin": "https://pota.app"},
+        timeout=10,
+    )
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError:
+        return False, f"HTTP {resp.status_code} - {resp.text[:200]}"
+    return True, "ok"
+
+
+class _SafeFormatDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
+def render_respot_comment(template: str, values: dict[str, str]) -> str:
+    """Fill {placeholder} slots in a user-configured respot template.
+    Unknown placeholders are left as-is instead of raising, since this text
+    comes from Settings and a typo shouldn't block the respot."""
+    try:
+        return template.format_map(_SafeFormatDict(values))
+    except (ValueError, IndexError):
+        return template
+
 
 CAT_BAUD_DEFAULT = 38400
 CAT_CMD_DELAY = 0.05
@@ -1331,6 +1381,10 @@ class App(tk.Tk):
         self.wavelog_station_id_var = tk.StringVar(value=config.get("wavelog_station_profile_id", ""))
         self.qrz_xml_user_var = tk.StringVar(value=config.get("qrz_xml_username", ""))
         self.qrz_xml_pass_var = tk.StringVar(value=config.get("qrz_xml_password", ""))
+        self.respot_enabled_var = tk.BooleanVar(value=config.get("respot_enabled", True))
+        self.respot_template_var = tk.StringVar(
+            value=config.get("respot_template", RESPOT_TEMPLATE_DEFAULT)
+        )
         self.qrz_xml_client = QrzXmlClient()
         self.qrz_xml_auth_failed = False
         self.locator_cache: dict[str, tuple[float, float] | None] = {}
@@ -1818,10 +1872,37 @@ class App(tk.Tk):
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+
+        tk.Label(content, text="Respot nach dem Loggen", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
+
+        tk.Checkbutton(
+            content, text="Aktivator nach jedem geloggten QSO automatisch respotten",
+            variable=self.respot_enabled_var,
+            fg=COL_TEXT, bg=COL_PANEL, selectcolor=COL_PANEL_ALT,
+            activebackground=COL_PANEL, activeforeground=COL_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        respot_template_row = row(content, "Kommentar-Vorlage")
+        ttk.Entry(
+            respot_template_row, textvariable=self.respot_template_var, style="Dark.TEntry", width=34,
+        ).pack(side="left")
+
+        tk.Label(
+            content, text="Sendet den geloggten Kontakt als neuen Spot an api.pota.app,\n"
+                      "damit andere Jäger sehen, dass der Aktivator noch aktiv ist.\n"
+                      "Platzhalter für die Vorlage: {call} {mycall} {rst_sent} {rst_rcvd}\n"
+                      "{freq} {mode} {ref} - unbekannte Platzhalter bleiben unverändert stehen.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
         _chip_button(content, "Speichern", command=self._save_log_settings).pack(padx=14, pady=(0, 10), fill="x")
 
     def _save_log_settings(self) -> None:
-        save_config({
+        config = load_config()
+        config.update({
             "my_callsign": self.my_callsign_var.get().strip().upper(),
             "my_gridsquare": self.my_grid_var.get().strip().upper(),
             "qrz_api_key": self.qrz_api_key_var.get().strip(),
@@ -1830,7 +1911,10 @@ class App(tk.Tk):
             "wavelog_station_profile_id": self.wavelog_station_id_var.get().strip(),
             "qrz_xml_username": self.qrz_xml_user_var.get().strip(),
             "qrz_xml_password": self.qrz_xml_pass_var.get().strip(),
+            "respot_enabled": bool(self.respot_enabled_var.get()),
+            "respot_template": self.respot_template_var.get().strip() or RESPOT_TEMPLATE_DEFAULT,
         })
+        save_config(config)
         self.qrz_xml_auth_failed = False
         self.qrz_xml_client.session_key = None
         self._update_dist_column_visibility()
@@ -2826,6 +2910,27 @@ class App(tk.Tk):
                 daemon=True,
             ).start()
 
+        if self.respot_enabled_var.get():
+            try:
+                frequency_khz = float(vars_["freq"].get().strip()) * 1000
+            except ValueError:
+                frequency_khz = None
+            if frequency_khz is not None:
+                comment = render_respot_comment(self.respot_template_var.get(), {
+                    "call": call,
+                    "mycall": self.my_callsign_var.get().strip().upper(),
+                    "rst_sent": fields.get("RST_SENT", ""),
+                    "rst_rcvd": fields.get("RST_RCVD", ""),
+                    "freq": vars_["freq"].get().strip(),
+                    "mode": fields["MODE"],
+                    "ref": vars_["sig_info"].get().strip(),
+                })
+                threading.Thread(
+                    target=self._post_respot_async,
+                    args=(call, frequency_khz, fields["MODE"], vars_["sig_info"].get().strip(), comment),
+                    daemon=True,
+                ).start()
+
         dlg.destroy()
 
     def _upload_to_qrz_async(self, api_key: str, record: str, call: str) -> None:
@@ -2851,6 +2956,20 @@ class App(tk.Tk):
             self.log_result_queue.put(f"Wavelog: {call} hochgeladen.")
         else:
             self.log_result_queue.put(f"Wavelog: Upload für {call} fehlgeschlagen ({info}).")
+
+    def _post_respot_async(
+        self, activator: str, frequency_khz: float, mode: str, reference: str, comments: str,
+    ) -> None:
+        spotter = self.my_callsign_var.get().strip().upper()
+        try:
+            ok, info = post_pota_spot(activator, spotter, frequency_khz, mode, reference, comments)
+        except requests.RequestException as exc:
+            self.log_result_queue.put(f"Respot für {activator} fehlgeschlagen: {exc}")
+            return
+        if ok:
+            self.log_result_queue.put(f"Respot für {activator} gesendet ({reference}, {mode}).")
+        else:
+            self.log_result_queue.put(f"Respot für {activator} fehlgeschlagen ({info}).")
 
     # -- tune button ------------------------------------------------------------
 
