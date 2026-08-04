@@ -2,7 +2,10 @@ name: Build Windows exe
 
 on:
   push:
-    branches: [main]
+    # "test" is only here temporarily while the test branch is being
+    # tried out - remove it again (back to just [main]) once that's
+    # merged or dropped.
+    branches: [main, test]
     paths:
       - "pota_tune_assist.py"
       - "requirements.txt"
@@ -23,7 +26,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.ref_name }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -81,4 +84,4 @@ jobs:
           fi
           git add POTA-Tune-Assist.exe
           git commit -m "Automated build: update POTA-Tune-Assist.exe [skip ci]"
-          git push origin HEAD:main
+          git push origin HEAD:${{ github.ref_name }}
