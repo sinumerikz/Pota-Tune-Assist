@@ -1184,17 +1184,6 @@ def format_age(iso_time: str) -> str:
     return f"{seconds // 3600}h"
 
 
-def strike(text: str) -> str:
-    """Fake strikethrough for ttk.Treeview cells (no rich text support -
-    font can only be set per row via tags, not per cell, so a real
-    "overstrike" font would strike the whole row including columns like the
-    worked-today badge that must stay readable). The mark is doubled per
-    character since a single COMBINING LONG STROKE OVERLAY often renders as
-    a series of short, gappy dashes rather than one continuous line,
-    especially in proportional fonts."""
-    return "̶̶".join(text) + "̶̶" if text else text
-
-
 MODE_CATEGORY = {
     "CW": "cw",
     "SSB": "ssb", "USB": "ssb", "LSB": "ssb", "PHONE": "ssb",
@@ -1284,6 +1273,7 @@ COL_RED = "#a1372c"
 COL_AMBER = "#b58c2b"
 COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
+COL_WORKED_BG = "#0a1a0a"
 
 
 def apply_dark_titlebar(window) -> bool:
@@ -1589,7 +1579,7 @@ class App(tk.Tk):
         self.tree.tag_configure("digital_even", background=COL_ROW_EVEN, foreground=COL_AMBER)
         self.tree.tag_configure("digital_odd", background=COL_ROW_ODD, foreground=COL_AMBER)
         self.tree.tag_configure("invalid", background=COL_ROW_EVEN, foreground=COL_RED)
-        self.tree.tag_configure("logged", background=COL_ROW_EVEN, foreground=COL_ACCENT_DIM)
+        self.tree.tag_configure("logged", background=COL_WORKED_BG, foreground=COL_ACCENT_DIM)
         # Listed after the mode/invalid/logged tags on favorite/outdoor rows
         # so their background wins while the other tag's foreground (mode
         # color, red for invalid, ...) still shows through - only
@@ -2623,10 +2613,6 @@ class App(tk.Tk):
             name = spot.park_name
             call = spot.activator
             freq_text = f"{spot.frequency_khz:.1f}"
-            if spot.invalid or already_logged:
-                name = strike(name)
-                call = strike(call)
-                freq_text = strike(freq_text)
 
             if badge == "DUPE":
                 worked_text = "♻ Heute schon gearbeitet"
