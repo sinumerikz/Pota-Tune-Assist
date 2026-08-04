@@ -1599,12 +1599,12 @@ class App(tk.Tk):
         # once here and just shown/hidden by _toggle_settings_panel(), so
         # it never steals focus into its own window.
         self._settings_visible = False
-        self.settings_panel = tk.Frame(table_frame, bg=COL_PANEL, width=380)
+        self.settings_panel = tk.Frame(table_frame, bg=COL_PANEL, width=460)
         self.settings_panel.pack_propagate(False)
         self._build_settings_panel(self.settings_panel)
 
-        tree_area = tk.Frame(table_frame, bg=COL_BG)
-        tree_area.pack(side="left", fill="both", expand=True)
+        self.tree_area = tk.Frame(table_frame, bg=COL_BG)
+        self.tree_area.pack(side="left", fill="both", expand=True)
 
         columns = (
             "fav", "outdoor", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc",
@@ -1622,7 +1622,7 @@ class App(tk.Tk):
         self.column_headers = headers
         self.all_columns = columns
         sortable_columns = {"call", "worked", "freq", "mode", "ref", "name", "loc", "dist", "age"}
-        self.tree = ttk.Treeview(tree_area, columns=columns, show="headings", height=18)
+        self.tree = ttk.Treeview(self.tree_area, columns=columns, show="headings", height=18)
         for col in columns:
             if col in sortable_columns:
                 self.tree.heading(col, text=headers[col], command=lambda c=col: self._sort_by_column(c))
@@ -1632,7 +1632,7 @@ class App(tk.Tk):
             self.tree.column(col, width=widths[col], anchor=anchor)
         self._update_dist_column_visibility()
 
-        vsb = ttk.Scrollbar(tree_area, orient="vertical", command=self.tree.yview,
+        vsb = ttk.Scrollbar(self.tree_area, orient="vertical", command=self.tree.yview,
                              style="Dark.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -1720,7 +1720,14 @@ class App(tk.Tk):
         if self._settings_visible:
             self.settings_panel.pack_forget()
         else:
-            self.settings_panel.pack(side="right", fill="y", padx=(12, 0))
+            # before=self.tree_area matters here: without it, pack() would
+            # append this panel after the tree area in the packing order,
+            # and since the tree area already claimed the whole cavity as
+            # an expand=True slave, the panel would get squeezed down to a
+            # sliver instead of its requested width - inserting it before
+            # the tree area in the order makes pack size the tree area
+            # around the panel's fixed width instead.
+            self.settings_panel.pack(side="right", fill="y", padx=(12, 0), before=self.tree_area)
             if not self.rig_model_displays:
                 self._refresh_rig_models()
         self._settings_visible = not self._settings_visible
