@@ -2,10 +2,7 @@ name: Build Windows exe
 
 on:
   push:
-    # "test" is only here temporarily while the test branch is being
-    # tried out - remove it again (back to just [main]) once that's
-    # merged or dropped.
-    branches: [main, test]
+    branches: [main]
     paths:
       - "pota_tune_assist.py"
       - "requirements.txt"
