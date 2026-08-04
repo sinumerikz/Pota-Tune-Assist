@@ -98,7 +98,7 @@ In den **Settings** lässt sich zwischen zwei Backends wählen:
   entweder diesen `bin`-Ordner zum PATH hinzufügen, oder – einfacher – in
   den Settings unter "Hamlib rigctld" das neue Feld **"rigctld-Pfad"**
   ausfüllen (über "Durchsuchen…" direkt auf `rigctld.exe` zeigen). Wird
-  lokal in `pota_tune_assist_config.json` gespeichert und ab dann für
+  lokal in `pota_tune_assist.db` gespeichert und ab dann für
   Modell-Liste und Auto-Start verwendet.
 
   ```bash
@@ -136,8 +136,10 @@ Windows zu bleiben (benötigt Windows 10 Version 2004/20H1 oder neuer bzw.
 Windows 11 - auf älteren Windows-Versionen bleibt sie weiß, dazu erscheint
 ein Hinweis im Programm-Log).
 
-Das **Settings**-Fenster scrollt (Mausrad oder Scrollbar rechts), falls der
-Inhalt nicht auf einmal auf den Bildschirm passt.
+**Settings** ist kein eigenes Fenster, sondern ein ein-/ausklappbares Panel
+rechts neben der Spot-Tabelle (Button "Settings" oben, oder das ✕ im Panel
+selbst zum Schließen) und scrollt (Mausrad oder Scrollbar rechts), falls der
+Inhalt nicht auf einmal in den sichtbaren Bereich passt.
 
 ## Installation
 
@@ -191,7 +193,7 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    Baudrate bzw. Host + Port) und **Verbinden** klicken. Das CAT-Badge
    oben rechts wird grün, sobald die Verbindung steht. Backend, Port/Baud
    bzw. Host/Netzwerk-Port werden bei jeder erfolgreichen Verbindung
-   automatisch in `pota_tune_assist_config.json` gespeichert – beim
+   automatisch in `pota_tune_assist.db` gespeichert – beim
    nächsten Programmstart verbindet die App **automatisch** damit, ganz
    ohne Klick auf "Verbinden". Bricht die Verbindung während des Betriebs
    ab (Kabel wackelt, USB-Aussetzer, rigctld stürzt ab), erkennt die App
@@ -208,7 +210,7 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    Spot-Liste vorkam ("Alle"/"Keine" zum Schnellauswählen, sowie ein
    **Kontinent-Schnellwahl** EU/NA/SA/AS/AF/OC – klickt alle bekannten
    Länder des jeweiligen Kontinents an bzw. wieder ab). Die Auswahl wird in
-   `pota_tune_assist_config.json` gespeichert und bleibt über Neustarts hinweg
+   `pota_tune_assist.db` gespeichert und bleibt über Neustarts hinweg
    erhalten. "Skip" blendet einzelne Spots aus, "Alle anzeigen" setzt das
    zurück. **"CAT-Log"** öffnet ein Debug-Fenster mit den rohen
    CAT-Befehlen/-Antworten (nur FT-710-CAT-Backend). **"Programm-Log"**
@@ -220,7 +222,7 @@ pyinstaller --onefile --windowed --name "POTA-Tune-Assist" pota_tune_assist.py
    werden rot durchgestrichen dargestellt, bleiben aber anklickbar. Der
    **☆-Stern** links von QSY markiert ein Rufzeichen als Favorit (⭐) –
    favorisierte Rufzeichen werden über alle Bands/Modes hinweg dauerhaft
-   gemerkt (`pota_tune_assist_config.json`) und ihre Spots erscheinen immer ganz
+   gemerkt (`pota_tune_assist.db`) und ihre Spots erscheinen immer ganz
    oben in der Liste, egal wie sortiert/gefiltert wird. Favoriten-Zeilen
    bekommen zusätzlich einen eigenen goldbraunen Zeilenhintergrund plus
    fette Schrift statt der normalen Mode-Farbcodierung. Die **🏕-Spalte**
@@ -326,7 +328,7 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    den eigenen Locator und den **QRZ-Logbook-API-Key** eintragen und
    "Speichern" klicken. Der QRZ-API-Key steht im QRZ-Logbook unter
    *Settings → API Key* (nicht der allgemeine XML-Subscription-Key, sondern
-   der Logbook-eigene). Diese Angaben werden lokal in `pota_tune_assist_config.json`
+   der Logbook-eigene). Diese Angaben werden lokal in `pota_tune_assist.db`
    neben dem Programm gespeichert. Ist kein API-Key hinterlegt, wird nur
    lokal geloggt, ohne QRZ-Upload.
 2. Optional zusätzlich (oder alternativ) im Abschnitt **"Wavelog"**: eigene

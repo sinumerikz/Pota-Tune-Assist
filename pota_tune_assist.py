@@ -48,6 +48,7 @@ import queue
 import re
 import shutil
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -98,7 +99,10 @@ def app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
+# Legacy path from before settings moved into DB_PATH below - only read
+# once, to migrate an existing install's settings into the database.
+LEGACY_CONFIG_PATH = app_dir() / "pota_tune_assist_config.json"
+DB_PATH = app_dir() / "pota_tune_assist.db"
 LOG_DIR = app_dir() / "logs"
 OUTDOOR_LIST_PATH = app_dir() / "draussenfunker.txt"
 OUTDOOR_LIST_URL = "https://calls.draussenfunker.de/df-polo-notes.txt"
@@ -111,20 +115,70 @@ ADIF_HEADER = (
 )
 
 
+def _db_connect() -> sqlite3.Connection:
+    """Settings live in a sibling SQLite file (same directory as the .exe,
+    same as the QSO logs) instead of the old JSON file - QSO logs
+    themselves stay plain ADIF, only app settings/state moved here."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    return conn
+
+
+def _migrate_legacy_json_config(conn: sqlite3.Connection) -> None:
+    """One-time import of an old pota_tune_assist_config.json into the
+    settings table, for installs upgrading from a version that still used
+    the JSON file. No-op once the settings table already has any rows."""
+    if not LEGACY_CONFIG_PATH.exists():
+        return
+    if conn.execute("SELECT 1 FROM settings LIMIT 1").fetchone():
+        return
+    try:
+        with open(LEGACY_CONFIG_PATH, "r", encoding="utf-8") as f:
+            old_config = json.load(f)
+    except (OSError, ValueError):
+        return
+    conn.executemany(
+        "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+        [(key, json.dumps(value)) for key, value in old_config.items()],
+    )
+    conn.commit()
+
+
 def load_config() -> dict:
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
+        conn = _db_connect()
+    except sqlite3.Error:
         return {}
+    try:
+        _migrate_legacy_json_config(conn)
+        config: dict = {}
+        for key, raw_value in conn.execute("SELECT key, value FROM settings"):
+            try:
+                config[key] = json.loads(raw_value)
+            except ValueError:
+                config[key] = raw_value
+        return config
+    finally:
+        conn.close()
 
 
 def save_config(config: dict) -> None:
+    """Upserts the given keys into the settings table - unlike the old
+    JSON file, keys already stored but not present in `config` are left
+    alone rather than dropped, since every caller here already loads,
+    merges, and passes the full dict back anyway."""
     try:
-        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-    except OSError:
-        pass
+        conn = _db_connect()
+    except sqlite3.Error:
+        return
+    try:
+        conn.executemany(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+            [(key, json.dumps(value)) for key, value in config.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def parse_outdoor_calls(text: str) -> set[str]:
@@ -1531,7 +1585,7 @@ class App(tk.Tk):
         self.alert_btn = _chip_button(filter_row, "Alarm: An", command=self._toggle_priority_alert)
         self.alert_btn.pack(side="left", padx=4)
         _chip_button(filter_row, "Alarm testen", command=self._test_priority_alert).pack(side="left", padx=4)
-        _chip_button(filter_row, "Settings", command=self._open_settings).pack(side="left", padx=4)
+        _chip_button(filter_row, "Settings", command=self._toggle_settings_panel).pack(side="left", padx=4)
         _chip_button(filter_row, "Alle anzeigen", command=self._unskip_all).pack(side="left", padx=4)
         _chip_button(filter_row, "CAT-Log", command=self._open_cat_log).pack(side="left", padx=4)
         _chip_button(filter_row, "Programm-Log", command=self._open_program_log).pack(side="left", padx=4)
@@ -1539,6 +1593,18 @@ class App(tk.Tk):
         # -- table -----------------------------------------------------------
         table_frame = tk.Frame(self, bg=COL_BG)
         table_frame.pack(fill="both", expand=True, padx=12, pady=6)
+
+        # Settings used to be a separate Toplevel dialog - now it's a
+        # collapsible panel docked to the right of the spot table, built
+        # once here and just shown/hidden by _toggle_settings_panel(), so
+        # it never steals focus into its own window.
+        self._settings_visible = False
+        self.settings_panel = tk.Frame(table_frame, bg=COL_PANEL, width=380)
+        self.settings_panel.pack_propagate(False)
+        self._build_settings_panel(self.settings_panel)
+
+        tree_area = tk.Frame(table_frame, bg=COL_BG)
+        tree_area.pack(side="left", fill="both", expand=True)
 
         columns = (
             "fav", "outdoor", "qsy", "call", "worked", "freq", "mode", "ref", "name", "loc",
@@ -1556,7 +1622,7 @@ class App(tk.Tk):
         self.column_headers = headers
         self.all_columns = columns
         sortable_columns = {"call", "worked", "freq", "mode", "ref", "name", "loc", "dist", "age"}
-        self.tree = ttk.Treeview(table_frame, columns=columns, show="headings", height=18)
+        self.tree = ttk.Treeview(tree_area, columns=columns, show="headings", height=18)
         for col in columns:
             if col in sortable_columns:
                 self.tree.heading(col, text=headers[col], command=lambda c=col: self._sort_by_column(c))
@@ -1566,7 +1632,7 @@ class App(tk.Tk):
             self.tree.column(col, width=widths[col], anchor=anchor)
         self._update_dist_column_visibility()
 
-        vsb = ttk.Scrollbar(table_frame, orient="vertical", command=self.tree.yview,
+        vsb = ttk.Scrollbar(tree_area, orient="vertical", command=self.tree.yview,
                              style="Dark.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -1650,21 +1716,28 @@ class App(tk.Tk):
             self.tune_power_var.set(float(TUNE_POWER_WATTS_DEFAULT))
         self.power_unit_var.set(self._power_unit_label())
 
-    def _open_settings(self) -> None:
-        dlg = tk.Toplevel(self, bg=COL_PANEL)
-        dlg.title("Settings")
-        dlg.geometry("460x640")
-        dlg.minsize(440, 320)
-        dlg.configure(bg=COL_PANEL)
-        apply_dark_titlebar(dlg)
-        dlg.transient(self)
+    def _toggle_settings_panel(self) -> None:
+        if self._settings_visible:
+            self.settings_panel.pack_forget()
+        else:
+            self.settings_panel.pack(side="right", fill="y", padx=(12, 0))
+            if not self.rig_model_displays:
+                self._refresh_rig_models()
+        self._settings_visible = not self._settings_visible
 
-        # Scrollable body - the settings content is taller than most screens
-        # allow for a fixed-size dialog, so it lives in a canvas+scrollbar
-        # instead of being packed directly into dlg (which just clipped the
-        # bottom of the dialog with no way to reach it).
-        canvas = tk.Canvas(dlg, bg=COL_PANEL, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(dlg, orient="vertical", command=canvas.yview)
+    def _build_settings_panel(self, parent: tk.Frame) -> None:
+        header_row = tk.Frame(parent, bg=COL_PANEL)
+        header_row.pack(fill="x")
+        tk.Label(header_row, text="Settings", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 11, "bold")).pack(side="left", padx=14, pady=10)
+        _chip_button(header_row, "✕", command=self._toggle_settings_panel).pack(side="right", padx=10, pady=6)
+
+        # Scrollable body - the settings content is taller than the panel
+        # allows in most windows, so it lives in a canvas+scrollbar instead
+        # of being packed directly into the panel (which just clipped the
+        # bottom with no way to reach it).
+        canvas = tk.Canvas(parent, bg=COL_PANEL, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
         content = tk.Frame(canvas, bg=COL_PANEL)
         content.bind("<Configure>", lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         content_window = canvas.create_window((0, 0), window=content, anchor="nw")
@@ -1678,7 +1751,6 @@ class App(tk.Tk):
 
         canvas.bind("<Enter>", lambda _e: canvas.bind_all("<MouseWheel>", _on_mousewheel))
         canvas.bind("<Leave>", lambda _e: canvas.unbind_all("<MouseWheel>"))
-        dlg.bind("<Destroy>", lambda _e: canvas.unbind_all("<MouseWheel>"))
 
         def row(parent, label):
             r = tk.Frame(parent, bg=COL_PANEL)
@@ -1731,6 +1803,11 @@ class App(tk.Tk):
             model_combo["values"] = base if not typed else [d for d in base if typed in d.lower()]
 
         model_combo.bind("<KeyRelease>", filter_models)
+        # Exposed so _toggle_settings_panel() can lazily trigger the first
+        # 'rigctld -l' model scan only once the panel is actually opened,
+        # not at app startup (that subprocess call can be slow, or log a
+        # "rigctld not found" line that's noise for pure FT-710 users).
+        self._refresh_rig_models = refresh_models
 
         rigctld_path_row = row(rigctld_frame, "rigctld-Pfad")
         rigctld_path_entry = ttk.Entry(
@@ -1772,9 +1849,6 @@ class App(tk.Tk):
                  "andernorts laufenden rigctld, Rig-Modell wird dann ignoriert.",
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 8), justify="left",
         ).pack(anchor="w", padx=14, pady=(0, 4))
-
-        if not self.rig_model_displays:
-            refresh_models()
 
         def sync_frames() -> None:
             if self.backend_var.get() == "rigctld":
