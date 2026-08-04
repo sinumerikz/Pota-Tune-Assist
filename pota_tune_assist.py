@@ -1184,11 +1184,6 @@ def format_age(iso_time: str) -> str:
     return f"{seconds // 3600}h"
 
 
-def strike(text: str) -> str:
-    """Fake strikethrough for ttk.Treeview cells (no rich text support)."""
-    return "̶".join(text) + "̶" if text else text
-
-
 MODE_CATEGORY = {
     "CW": "cw",
     "SSB": "ssb", "USB": "ssb", "LSB": "ssb", "PHONE": "ssb",
@@ -1582,8 +1577,14 @@ class App(tk.Tk):
         self.tree.tag_configure("ssb_odd", background=COL_ROW_ODD, foreground=COL_TEXT)
         self.tree.tag_configure("digital_even", background=COL_ROW_EVEN, foreground=COL_AMBER)
         self.tree.tag_configure("digital_odd", background=COL_ROW_ODD, foreground=COL_AMBER)
-        self.tree.tag_configure("invalid", background=COL_ROW_EVEN, foreground=COL_RED)
-        self.tree.tag_configure("logged", background=COL_ROW_EVEN, foreground=COL_ACCENT_DIM)
+        self.tree.tag_configure(
+            "invalid", background=COL_ROW_EVEN, foreground=COL_RED,
+            font=("Segoe UI", 10, "overstrike"),
+        )
+        self.tree.tag_configure(
+            "logged", background=COL_ROW_EVEN, foreground=COL_ACCENT_DIM,
+            font=("Segoe UI", 10, "overstrike"),
+        )
         # Listed after the mode/invalid/logged tags on favorite/outdoor rows
         # so their background wins while the other tag's foreground (mode
         # color, red for invalid, ...) still shows through - only
@@ -2617,10 +2618,6 @@ class App(tk.Tk):
             name = spot.park_name
             call = spot.activator
             freq_text = f"{spot.frequency_khz:.1f}"
-            if spot.invalid or already_logged:
-                name = strike(name)
-                call = strike(call)
-                freq_text = strike(freq_text)
 
             if badge == "DUPE":
                 worked_text = "♻ Heute schon gearbeitet"
