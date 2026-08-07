@@ -1644,6 +1644,11 @@ class App(tk.Tk):
                          insertcolor=COL_TEXT, borderwidth=0)
         style.configure("Dark.Vertical.TScrollbar", background=COL_PANEL_ALT,
                          troughcolor=COL_BG, arrowcolor=COL_ACCENT, borderwidth=0)
+        # Default 'clam' sash is a thin near-invisible line on a dark
+        # background - widen it and give it a visible color so the
+        # list/map divider actually reads as something draggable.
+        style.configure("TPanedwindow", background=COL_BG)
+        style.configure("Sash", sashthickness=8, gripcount=8, sashrelief="raised")
 
     # -- UI construction -----------------------------------------------------
 
