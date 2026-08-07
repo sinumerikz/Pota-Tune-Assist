@@ -1181,6 +1181,33 @@ class QrzCallsignInfo:
     op_name: str | None
 
 
+# Portable/mobile-style suffixes that never form part of an operator's
+# actual registered callsign - stripped in base_callsign_for_lookup() below.
+_CALLSIGN_MODIFIER_SUFFIXES = {"P", "M", "MM", "AM", "QRP", "A", "B", "R", "LH"}
+
+
+def base_callsign_for_lookup(call: str) -> str:
+    """QRZ's XML lookup is keyed on an operator's actual registered
+    callsign, so a compound call like "F4MPJ/P" (portable) or "DL/W1AW"
+    (operating from another country) never matches anything by itself -
+    strip the modifier/prefix part so the lookup can find the operator.
+    Heuristic: drop parts that are pure call-area digits (W1AW/4) or a
+    known portable/mobile suffix (/P, /M, /QRP, ...), then, if a prefix
+    override remains (DL/W1AW), keep the longest remaining part - a real
+    callsign always has a digit plus letters on both sides of it, so it's
+    reliably longer than a bare 1-3 letter country prefix. Not resolved
+    against a full ITU prefix table, so this can still guess wrong for
+    unusually short vintage-style home calls."""
+    call = (call or "").strip().upper()
+    if "/" not in call:
+        return call
+    parts = [p for p in call.split("/") if p]
+    candidates = [p for p in parts if p not in _CALLSIGN_MODIFIER_SUFFIXES and not p.isdigit()]
+    if not candidates:
+        candidates = parts
+    return max(candidates, key=len) if candidates else call
+
+
 class QrzXmlClient:
     """Thin client for QRZ.com's XML lookup API (a separate subscription
     and separate username/password login from the QRZ Logbook API used
@@ -2710,7 +2737,7 @@ class App(tk.Tk):
         my_latlon = grid_to_latlon(self.my_grid_var.get())
         if my_latlon is None:
             return None
-        info = self.locator_cache.get((spot.activator or "").strip().upper())
+        info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
         if not info or not info.latlon:
             return None
         return haversine_km(my_latlon[0], my_latlon[1], info.latlon[0], info.latlon[1])
@@ -2722,13 +2749,13 @@ class App(tk.Tk):
     def _spot_op_name(self, spot: Spot) -> str:
         if not self._qrz_xml_ready():
             return ""
-        info = self.locator_cache.get((spot.activator or "").strip().upper())
+        info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
         return info.op_name if info and info.op_name else ""
 
     def _queue_locator_lookups(self, spots: list[Spot]) -> None:
         if not self._qrz_xml_ready():
             return
-        calls = {(s.activator or "").strip().upper() for s in spots if s.activator}
+        calls = {base_callsign_for_lookup(s.activator) for s in spots if s.activator}
         for call in calls:
             if not call or call in self.locator_cache or call in self.locator_lookup_pending:
                 continue
