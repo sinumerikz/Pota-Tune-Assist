@@ -43,14 +43,15 @@ QRZ-Upload – alles in einer Oberfläche.
   bleiben über Neustarts hinweg erhalten (nur das Suchfeld nicht, das
   ist bei jedem Start wieder leer). "Skip" blendet einzelne Spots aus,
   "Alle anzeigen" setzt das zurück.
-- **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, HEUTE,
+- **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, OP, HEUTE,
   FREQ, MODE, REF, NAME, LOC, KM, AGE) sortiert danach, erneuter Klick dreht
   die Richtung um (▲/▼ im Spaltenkopf). ⭐-Favoriten und 🏕-Draußenfunker
   bleiben dabei immer oben, unabhängig von der gewählten Sortierung.
-- **Entfernung zum Aktivator (KM)** – optionale Spalte, berechnet per
-  QRZ.com-XML-Lookup (eigenes, kostenpflichtiges QRZ-Abo nötig); erscheint
-  nur, wenn QRZ-Zugangsdaten + eigener Locator in den Settings hinterlegt
-  sind, sonst komplett ausgeblendet und keine Abfragen.
+- **Name und Entfernung des Aktivators (OP/KM)** – optionale Spalten,
+  berechnet per QRZ.com-XML-Lookup (eigenes, kostenpflichtiges QRZ-Abo
+  nötig); OP erscheint mit QRZ-Zugangsdaten in den Settings, KM zusätzlich
+  mit eigenem Locator, sonst bleiben beide komplett ausgeblendet und es
+  werden keine Abfragen ausgeführt.
 - **Sonnendaten (SFI/K/A/MUF)** – Badge oben rechts, alle 15 Minuten
   aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
@@ -358,27 +359,29 @@ gerade gesetzte Frequenz wieder um diesen Betrag verschieben.
    welche Stationen aus der aktuellen Spot-Liste schon geloggt wurden, ohne
    sie wie "Skip" komplett auszublenden.
 
-## Entfernung zum Aktivator (KM-Spalte)
+## Name des Aktivators (OP-Spalte) und Entfernung (KM-Spalte)
 
 Optional, erfordert eine **kostenpflichtige QRZ.com-XML-Lookup-Subscription**
 (ein eigener QRZ.com-Login, nicht der Logbook-API-Key von oben – separates
 QRZ-Feature/Abo). In den **Settings** unter "QRZ XML-Lookup" **QRZ-Benutzer**
-und **QRZ-Passwort** eintragen, dazu oben unter "Log / QRZ Logbook" den
-**eigenen Locator** (Maidenhead, z. B. `JO40`) ausfüllen und "Speichern"
-klicken.
+und **QRZ-Passwort** eintragen und "Speichern" klicken. Für die Entfernung
+zusätzlich oben unter "Log / QRZ Logbook" den **eigenen Locator** (Maidenhead,
+z. B. `JO40`) ausfüllen.
 
-- Sind alle drei Felder ausgefüllt, erscheint automatisch eine neue Spalte
-  **KM** in der Spot-Tabelle, und die App fragt für **jeden** Spot per
-  QRZ-XML-API die Position des Aktivator-Rufzeichens ab (Ergebnis pro
-  Rufzeichen für die laufende Sitzung zwischengespeichert, damit derselbe
-  Aktivator nicht mehrfach abgefragt wird) und berechnet die Luftlinien-
-  Entfernung zu deinem eigenen Locator. Die Spalte ist wie alle anderen
+- Sind QRZ-Benutzer und -Passwort ausgefüllt, erscheint automatisch eine neue
+  Spalte **OP** in der Spot-Tabelle mit dem Vor-/Nachnamen des Aktivators aus
+  dessen QRZ-Profil (leer, falls dort nicht hinterlegt). Ist zusätzlich der
+  eigene Locator gesetzt, erscheint auch die Spalte **KM** mit der
+  Luftlinien-Entfernung. Beide Spalten stammen aus derselben QRZ-XML-Abfrage
+  pro Rufzeichen (Ergebnis für die laufende Sitzung zwischengespeichert, damit
+  derselbe Aktivator nicht mehrfach abgefragt wird) und sind wie alle anderen
   sortierbar. Neue Rufzeichen werden über einen Pool von 6 parallelen
   Abfragen nachgeladen (nicht nacheinander), damit z. B. nach dem Start
-  viele gleichzeitig aktive Spots zügig ihre Entfernung bekommen.
-- Fehlt eines der drei Felder (Benutzer, Passwort oder eigener Locator),
-  bleibt die KM-Spalte komplett ausgeblendet und es werden **keinerlei**
-  QRZ-XML-Abfragen ausgeführt.
+  viele gleichzeitig aktive Spots zügig ihre Daten bekommen.
+- Fehlen QRZ-Benutzer oder -Passwort, bleiben OP- und KM-Spalte komplett
+  ausgeblendet und es werden **keinerlei** QRZ-XML-Abfragen ausgeführt. Fehlt
+  nur der eigene Locator, bleibt nur die KM-Spalte ausgeblendet, die
+  OP-Spalte erscheint trotzdem.
 - Schlägt der QRZ-Login fehl (falsche Zugangsdaten), erscheint das einmalig
   in der Statuszeile und die App versucht es nicht automatisch erneut –
   Zugangsdaten korrigieren und neu speichern, um es erneut zu versuchen.
