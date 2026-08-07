@@ -1202,6 +1202,25 @@ MAP_TILE_SERVER_DARK = "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png
 MAP_OWN_MARKER_DIAMETER = 16
 MAP_SPOT_MARKER_DIAMETER = 11
 
+# Distinct color per band for spot markers on the map, so band is readable
+# at a glance instead of every spot looking the same. Falls back to
+# BAND_MAP_COLOR_DEFAULT for anything not listed (e.g. band_for_khz()
+# returning "?" for an out-of-band frequency).
+BAND_MAP_COLORS = {
+    "160m": "#8B5A2B",
+    "80m": "#E67E22",
+    "60m": "#F1C40F",
+    "40m": "#3498DB",
+    "30m": "#1ABC9C",
+    "20m": "#2ECC71",
+    "17m": "#16A085",
+    "15m": "#9B59B6",
+    "12m": "#E91E8C",
+    "10m": "#E74C3C",
+    "6m": "#ECF0F1",
+}
+BAND_MAP_COLOR_DEFAULT = "#95A5A6"
+
 
 def _make_map_dot_icon(color: str, diameter: int) -> ImageTk.PhotoImage:
     """A small filled-circle marker icon - tkintermapview's built-in marker
@@ -2820,10 +2839,19 @@ class App(tk.Tk):
         # collected (and vanish from the canvas) the moment nothing in
         # Python still references them.
         self._map_icon_own = _make_map_dot_icon(COL_ACCENT, MAP_OWN_MARKER_DIAMETER)
-        self._map_icon_spot = _make_map_dot_icon(COL_RED, MAP_SPOT_MARKER_DIAMETER)
+        self._map_band_icons: dict[str, ImageTk.PhotoImage] = {}
+        # 1x1 fully transparent icon: passing *any* icon (even invisible)
+        # takes CanvasPositionMarker's "custom icon" draw path instead of
+        # its hardcoded big teardrop-pin shape, so a marker with only text
+        # (the QSY line's km label) shows just the label, no shape at all.
+        self._map_icon_blank = ImageTk.PhotoImage(Image.new("RGBA", (1, 1), (0, 0, 0, 0)))
 
         self.own_qth_marker = None
         self.spot_markers: list = []
+        self.qsy_line = None
+        self.qsy_line_label = None
+        self._qsy_line_animation_job = None
+        self._qsy_line_dash_offset = 0
         self._update_own_qth_marker()
         self._update_map_hint()
 
@@ -2850,6 +2878,14 @@ class App(tk.Tk):
         )
         self.map_widget.set_position(lat, lon)
 
+    def _get_band_marker_icon(self, band: str) -> ImageTk.PhotoImage:
+        icon = self._map_band_icons.get(band)
+        if icon is None:
+            color = BAND_MAP_COLORS.get(band, BAND_MAP_COLOR_DEFAULT)
+            icon = _make_map_dot_icon(color, MAP_SPOT_MARKER_DIAMETER)
+            self._map_band_icons[band] = icon
+        return icon
+
     def _update_map_markers(self, visible_spots: list[Spot]) -> None:
         for marker in self.spot_markers:
             marker.delete()
@@ -2867,9 +2903,11 @@ class App(tk.Tk):
                 continue
             plotted.add(base_call)
             lat, lon = info.latlon
+            band = band_for_khz(spot.frequency_khz)
             marker = self.map_widget.set_marker(
                 lat, lon, text=spot.activator,
-                icon=self._map_icon_spot, icon_anchor="center", text_color=COL_RED,
+                icon=self._get_band_marker_icon(band), icon_anchor="center",
+                text_color=BAND_MAP_COLORS.get(band, BAND_MAP_COLOR_DEFAULT),
                 command=self._on_map_marker_click, data=spot.spot_id,
             )
             self.spot_markers.append(marker)
@@ -2877,6 +2915,56 @@ class App(tk.Tk):
     def _on_map_marker_click(self, marker) -> None:
         if marker.data is not None:
             self._qsy_to_spot_id(marker.data)
+
+    # -- QSY great-circle line ------------------------------------------------
+
+    def _clear_qsy_line(self) -> None:
+        if self._qsy_line_animation_job is not None:
+            self.after_cancel(self._qsy_line_animation_job)
+            self._qsy_line_animation_job = None
+        if self.qsy_line is not None:
+            self.qsy_line.delete()
+            self.qsy_line = None
+        if self.qsy_line_label is not None:
+            self.qsy_line_label.delete()
+            self.qsy_line_label = None
+
+    def _update_qsy_line(self, spot: Spot) -> None:
+        """Draws an animated dashed line from the own QTH to the spot just
+        QSY'd to, labelled with the great-circle-ish distance - same
+        QRZ XML coordinates as the map markers/KM column, so it needs the
+        same paid lookup configured."""
+        self._clear_qsy_line()
+        if not self._qrz_xml_ready():
+            return
+        my_latlon = grid_to_latlon(self.my_grid_var.get())
+        if my_latlon is None:
+            return
+        info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
+        if not info or not info.latlon:
+            return
+        target_latlon = info.latlon
+        km = haversine_km(my_latlon[0], my_latlon[1], target_latlon[0], target_latlon[1])
+
+        self.qsy_line = self.map_widget.set_path([my_latlon, target_latlon], color=COL_ACCENT, width=3)
+        self.map_widget.canvas.itemconfig(self.qsy_line.canvas_line, dash=(6, 4))
+        self._qsy_line_dash_offset = 0
+        self._animate_qsy_line()
+
+        mid_lat = (my_latlon[0] + target_latlon[0]) / 2
+        mid_lon = (my_latlon[1] + target_latlon[1]) / 2
+        self.qsy_line_label = self.map_widget.set_marker(
+            mid_lat, mid_lon, text=f"{km:.0f} km",
+            icon=self._map_icon_blank, icon_anchor="center", text_color=COL_ACCENT,
+        )
+
+    def _animate_qsy_line(self) -> None:
+        if self.qsy_line is None or self.qsy_line.canvas_line is None:
+            self._qsy_line_animation_job = None
+            return
+        self._qsy_line_dash_offset = (self._qsy_line_dash_offset + 1) % 10
+        self.map_widget.canvas.itemconfig(self.qsy_line.canvas_line, dashoffset=self._qsy_line_dash_offset)
+        self._qsy_line_animation_job = self.after(80, self._animate_qsy_line)
 
     def _spot_distance_km(self, spot: Spot) -> float | None:
         if not self._qrz_xml_ready():
@@ -3145,6 +3233,7 @@ class App(tk.Tk):
             f"Funkgerät bestätigt {confirmed_freq} Hz ({confirmed_mode}) - {spot.reference}"
         )
         self.qsy_spot_id = spot_id
+        self._update_qsy_line(spot)
         self._render_spots()
 
     # -- log contact ------------------------------------------------------------
