@@ -121,6 +121,10 @@ def _db_connect() -> sqlite3.Connection:
     themselves stay plain ADIF, only app settings/state moved here."""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS qrz_cache ("
+        "call TEXT PRIMARY KEY, lat REAL, lon REAL, op_name TEXT, fetched_at TEXT NOT NULL)"
+    )
     return conn
 
 
@@ -175,6 +179,50 @@ def save_config(config: dict) -> None:
         conn.executemany(
             "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
             [(key, json.dumps(value)) for key, value in config.items()],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_qrz_cache() -> dict[str, "QrzCallsignInfo | None"]:
+    """Callsign -> QrzCallsignInfo (or None for a confirmed "not in QRZ")
+    persisted from previous sessions, so returning activators show their
+    OP/KM immediately instead of waiting on a fresh lookup every single
+    app start. Entries older than QRZ_CACHE_TTL_DAYS are treated as if
+    they were never cached (a fresh lookup will refresh them)."""
+    try:
+        conn = _db_connect()
+    except sqlite3.Error:
+        return {}
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=QRZ_CACHE_TTL_DAYS)).isoformat()
+        cache: dict[str, QrzCallsignInfo | None] = {}
+        rows = conn.execute(
+            "SELECT call, lat, lon, op_name FROM qrz_cache WHERE fetched_at >= ?", (cutoff,)
+        )
+        for call, lat, lon, op_name in rows:
+            latlon = (lat, lon) if lat is not None and lon is not None else None
+            cache[call] = QrzCallsignInfo(latlon=latlon, op_name=op_name) if (latlon or op_name) else None
+        return cache
+    finally:
+        conn.close()
+
+
+def save_qrz_cache_entry(call: str, info: "QrzCallsignInfo | None") -> None:
+    lat = lon = op_name = None
+    if info is not None:
+        op_name = info.op_name
+        if info.latlon is not None:
+            lat, lon = info.latlon
+    try:
+        conn = _db_connect()
+    except sqlite3.Error:
+        return
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO qrz_cache (call, lat, lon, op_name, fetched_at) VALUES (?, ?, ?, ?, ?)",
+            (call, lat, lon, op_name, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
     finally:
@@ -1115,7 +1163,8 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 
 
 QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
-LOCATOR_WORKER_COUNT = 6
+LOCATOR_WORKER_COUNT = 12
+QRZ_CACHE_TTL_DAYS = 30
 
 
 class QrzXmlError(Exception):
@@ -1444,7 +1493,7 @@ class App(tk.Tk):
         )
         self.qrz_xml_client = QrzXmlClient()
         self.qrz_xml_auth_failed = False
-        self.locator_cache: dict[str, QrzCallsignInfo | None] = {}
+        self.locator_cache: dict[str, QrzCallsignInfo | None] = load_qrz_cache()
         self.locator_lookup_pending: set[str] = set()
         self.locator_result_queue: queue.Queue = queue.Queue()
         self.locator_work_queue: queue.Queue = queue.Queue()
@@ -2698,6 +2747,7 @@ class App(tk.Tk):
             if username and password:
                 try:
                     info = self.qrz_xml_client.lookup_callsign(username, password, call)
+                    save_qrz_cache_entry(call, info)
                     self.locator_result_queue.put(("ok", call, info))
                 except QrzXmlAuthError as exc:
                     self.locator_result_queue.put(("auth_error", call, str(exc)))
