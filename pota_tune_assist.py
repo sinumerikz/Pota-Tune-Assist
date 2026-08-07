@@ -65,6 +65,7 @@ from tkinter import filedialog, messagebox, ttk
 import requests
 import serial
 import tkintermapview
+from PIL import Image, ImageDraw, ImageTk
 import serial.tools.list_ports
 
 POTA_SPOTS_URL = "https://api.pota.app/spot/activator"
@@ -1197,6 +1198,23 @@ MAP_DEFAULT_ZOOM = 2
 # instead of tkintermapview's light-themed OSM default, to match the rest
 # of the app's dark UI instead of a bright rectangle punched into it.
 MAP_TILE_SERVER_DARK = "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+
+MAP_OWN_MARKER_DIAMETER = 16
+MAP_SPOT_MARKER_DIAMETER = 11
+
+
+def _make_map_dot_icon(color: str, diameter: int) -> ImageTk.PhotoImage:
+    """A small filled-circle marker icon - tkintermapview's built-in marker
+    shape (a big teardrop pin) has no size option at all, hardcoded pixel
+    dimensions in its drawing code, so a plain custom icon is the only way
+    to get compact, precisely-centered dots instead."""
+    scale = 4  # draw oversized and downscale for antialiased edges
+    img = Image.new("RGBA", (diameter * scale, diameter * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((scale, scale, diameter * scale - scale, diameter * scale - scale),
+                 fill=color, outline="#111111", width=scale)
+    img = img.resize((diameter, diameter), Image.LANCZOS)
+    return ImageTk.PhotoImage(img)
 
 
 class QrzXmlError(Exception):
@@ -2798,6 +2816,12 @@ class App(tk.Tk):
         self.map_widget.set_position(MAP_DEFAULT_LAT, MAP_DEFAULT_LON)
         self.map_widget.set_zoom(MAP_DEFAULT_ZOOM)
 
+        # Kept as instance attributes - Tkinter PhotoImages are garbage
+        # collected (and vanish from the canvas) the moment nothing in
+        # Python still references them.
+        self._map_icon_own = _make_map_dot_icon(COL_ACCENT, MAP_OWN_MARKER_DIAMETER)
+        self._map_icon_spot = _make_map_dot_icon(COL_RED, MAP_SPOT_MARKER_DIAMETER)
+
         self.own_qth_marker = None
         self.spot_markers: list = []
         self._update_own_qth_marker()
@@ -2822,7 +2846,7 @@ class App(tk.Tk):
         lat, lon = latlon
         self.own_qth_marker = self.map_widget.set_marker(
             lat, lon, text="Eigener Standort",
-            marker_color_circle=COL_ACCENT, marker_color_outside=COL_ACCENT, text_color=COL_ACCENT,
+            icon=self._map_icon_own, icon_anchor="center", text_color=COL_ACCENT,
         )
         self.map_widget.set_position(lat, lon)
 
@@ -2845,7 +2869,7 @@ class App(tk.Tk):
             lat, lon = info.latlon
             marker = self.map_widget.set_marker(
                 lat, lon, text=spot.activator,
-                marker_color_circle=COL_RED, marker_color_outside=COL_RED, text_color=COL_RED,
+                icon=self._map_icon_spot, icon_anchor="center", text_color=COL_RED,
                 command=self._on_map_marker_click, data=spot.spot_id,
             )
             self.spot_markers.append(marker)
