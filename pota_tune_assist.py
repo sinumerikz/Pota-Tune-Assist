@@ -450,6 +450,14 @@ RIGCTLD_TUNE_LEVEL_DEFAULT = 0.05
 TUNE_OFFSET_HZ_DEFAULT = 5000
 MAX_TUNE_SECONDS = 10
 
+# Operating power restored after TUNE releases, looked up by mode instead of
+# trying to read the pre-tune power back off the rig (not every backend
+# supports reading RFPOWER back at all - see TuneController).
+SSB_POWER_WATTS_DEFAULT = 100
+CW_POWER_WATTS_DEFAULT = 100
+RIGCTLD_SSB_LEVEL_DEFAULT = 0.5
+RIGCTLD_CW_LEVEL_DEFAULT = 0.5
+
 CW_MODE_NAME = "CW"
 
 # TUNE moves off-frequency by roughly one channel width of whatever mode
@@ -610,12 +618,6 @@ class Ft710Cat:
             raise CatError(f"Mode {mode_name!r} nicht auf FT-710-CAT-Code abbildbar")
         self._write(f"MD0{char};")
 
-    def get_power(self) -> int:
-        reply = self._transact("PC;")
-        if not reply.startswith("PC") or len(reply) < 6:
-            raise CatError(f"Unerwartete PC-Antwort: {reply!r}")
-        return int(reply[2:5])
-
     def set_power(self, watts: float) -> None:
         self._write(f"PC{int(round(watts)):03d};")
 
@@ -713,23 +715,6 @@ class RigctldClient:
 
     def set_mode(self, mode_name: str) -> None:
         self._transact(f"M {mode_name.upper()} 0")
-
-    def get_power(self) -> float:
-        lines = self._transact("l RFPOWER")
-        for line in lines:
-            if line.startswith("Level Value:"):
-                return float(line.split(":", 1)[1].strip())
-        # Some Hamlib versions/backends format the get_level reply
-        # differently (or don't label it "Level Value:") - fall back to
-        # treating a bare numeric line as the value before giving up.
-        for line in reversed(lines):
-            if line.startswith("RPRT"):
-                continue
-            try:
-                return float(line.strip())
-            except ValueError:
-                continue
-        raise CatError("Kein Level in rigctld-Antwort")
 
     def set_power(self, level: float) -> None:
         self._transact(f"L RFPOWER {level}")
@@ -879,11 +864,17 @@ def set_verified(get_fn, set_fn, target, attempts: int = 3, retry_delay: float =
 
 
 class TuneController:
-    """Mirrors the Cardputer firmware's tune logic: read back frequency,
-    mode and power before transmitting, restore all three afterwards -
-    never assume, always verify first. Works against either backend
-    (Ft710Cat or RigctldClient) since both expose the same
-    get/set_freq_hz, get/set_mode and get/set_power methods."""
+    """Mirrors the Cardputer firmware's tune logic: read back frequency and
+    mode before transmitting, restore both afterwards - never assume,
+    always verify first. Works against either backend (Ft710Cat or
+    RigctldClient) since both expose the same get/set_freq_hz, get/set_mode
+    and get/set_power methods.
+
+    Power is handled differently: not every Hamlib rig backend supports
+    reading RFPOWER back (many only support setting it), so instead of
+    reading the pre-tune power off the rig and hoping to restore it,
+    restore_power_by_mode (passed into start()) looks up the configured
+    SSB/CW operating power for whatever mode is being restored to."""
 
     def __init__(self, cat):
         self.cat = cat
@@ -891,11 +882,13 @@ class TuneController:
         self.start_time = 0.0
         self.saved_freq: int | None = None
         self.saved_mode: str | None = None
-        self.saved_power: float | None = None
-        self.power_unreadable = False
+        self.restore_power_by_mode = None
         self.last_offset_hz = 0
 
-    def start(self, tune_power: float, offset_sign: int, fallback_offset_hz: int) -> None:
+    def start(
+        self, tune_power: float, offset_sign: int, fallback_offset_hz: int,
+        restore_power_by_mode,
+    ) -> None:
         if self.active:
             return
         if not self.cat.connected:
@@ -903,19 +896,10 @@ class TuneController:
 
         freq = self.cat.get_freq_hz()
         mode = self.cat.get_mode()
-        # Not every Hamlib rig backend supports reading RFPOWER back (many
-        # only support setting it) - that must not block tuning entirely,
-        # it just means the original power can't be restored afterward.
-        try:
-            power = self.cat.get_power()
-            self.power_unreadable = False
-        except CatError:
-            power = None
-            self.power_unreadable = True
 
         self.saved_freq = freq
         self.saved_mode = mode
-        self.saved_power = power
+        self.restore_power_by_mode = restore_power_by_mode
 
         bandwidth = MODE_BANDWIDTH_HZ.get(mode.upper(), abs(fallback_offset_hz))
         offset_hz = (1 if offset_sign >= 0 else -1) * bandwidth
@@ -957,9 +941,9 @@ class TuneController:
                 set_verified(self.cat.get_freq_hz, self.cat.set_freq_hz, self.saved_freq)
             except CatError as exc:
                 errors.append(str(exc))
-        if self.saved_power is not None:
+        if self.saved_mode is not None and self.restore_power_by_mode is not None:
             try:
-                self.cat.set_power(self.saved_power)
+                self.cat.set_power(self.restore_power_by_mode(self.saved_mode))
             except CatError as exc:
                 errors.append(str(exc))
         if errors:
@@ -1459,6 +1443,19 @@ class App(tk.Tk):
         self.rigctld_path_var = tk.StringVar(value=config.get("rigctld_path", ""))
         self.tune_power_var = tk.DoubleVar(value=float(TUNE_POWER_WATTS_DEFAULT))
         self.power_unit_var = tk.StringVar(value="Leistung (W)")
+        # Operating power restored after TUNE releases (see TuneController) -
+        # unlike tune_power_var these are real settings, persisted like the
+        # rest of config. Default depends on backend since rigctld's RFPOWER
+        # is a 0.0-1.0 fraction, not absolute watts.
+        rigctld_at_startup = self.backend_var.get() == "rigctld"
+        self.ssb_power_var = tk.DoubleVar(value=config.get(
+            "ssb_power",
+            RIGCTLD_SSB_LEVEL_DEFAULT if rigctld_at_startup else float(SSB_POWER_WATTS_DEFAULT),
+        ))
+        self.cw_power_var = tk.DoubleVar(value=config.get(
+            "cw_power",
+            RIGCTLD_CW_LEVEL_DEFAULT if rigctld_at_startup else float(CW_POWER_WATTS_DEFAULT),
+        ))
         self.offset_var = tk.IntVar(value=TUNE_OFFSET_HZ_DEFAULT)
         self.offset_sign_var = tk.StringVar(value="above")
         saved_band = config.get("band_filter", BAND_FILTER_OPTIONS[0])
@@ -1705,6 +1702,13 @@ class App(tk.Tk):
     def _power_unit_label(self) -> str:
         return "Power Level (0-1)" if self.backend_var.get() == "rigctld" else "Leistung (W)"
 
+    def _power_for_mode(self, mode: str) -> float:
+        """SSB/CW operating power configured in Settings for the given
+        mode - used by TuneController to restore power after TUNE releases.
+        Digital modes (FT8, RTTY, ...) fall under the SSB value, same as
+        everywhere else in the app that only distinguishes cw/non-cw."""
+        return self.cw_power_var.get() if mode_category(mode) == "cw" else self.ssb_power_var.get()
+
     def _on_backend_display_change(self) -> None:
         key = BACKEND_DISPLAY_TO_KEY.get(self.backend_display_var.get(), "ft710")
         if key == self.backend_var.get():
@@ -1870,6 +1874,29 @@ class App(tk.Tk):
         backend_combo.bind("<<ComboboxSelected>>", on_backend_selected)
         sync_frames()
 
+        tk.Label(
+            content, text="Betriebsleistung (nach TUNE)", fg=COL_MUTED, bg=COL_PANEL,
+            font=("Segoe UI", 8, "italic"),
+        ).pack(anchor="w", padx=14, pady=(6, 0))
+
+        ssb_power_row = row(content, "SSB-Leistung")
+        ttk.Entry(ssb_power_row, textvariable=self.ssb_power_var, style="Dark.TEntry", width=8).pack(side="left")
+        tk.Label(ssb_power_row, textvariable=self.power_unit_var, fg=COL_MUTED, bg=COL_PANEL,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+
+        cw_power_row = row(content, "CW-Leistung")
+        ttk.Entry(cw_power_row, textvariable=self.cw_power_var, style="Dark.TEntry", width=8).pack(side="left")
+        tk.Label(cw_power_row, textvariable=self.power_unit_var, fg=COL_MUTED, bg=COL_PANEL,
+                 font=("Segoe UI", 8)).pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            content, text="Wird nach jedem Loslassen von TUNE automatisch gesetzt (je\n"
+                      "nach Mode SSB oder CW), statt zu versuchen die vorherige\n"
+                      "Leistung vom Funkgerät zurückzulesen (nicht jedes Rig-Backend\n"
+                      "unterstützt das zuverlässig).",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
         self.connect_btn = _chip_button(
             content, "Trennen" if self.cat.connected else "Verbinden", command=self._toggle_connect,
         )
@@ -1990,6 +2017,8 @@ class App(tk.Tk):
             "qrz_xml_password": self.qrz_xml_pass_var.get().strip(),
             "respot_enabled": bool(self.respot_enabled_var.get()),
             "respot_template": self.respot_template_var.get().strip() or RESPOT_TEMPLATE_DEFAULT,
+            "ssb_power": self.ssb_power_var.get(),
+            "cw_power": self.cw_power_var.get(),
         })
         save_config(config)
         self.qrz_xml_auth_failed = False
@@ -3051,7 +3080,7 @@ class App(tk.Tk):
             return
         sign = -1 if self.offset_sign_var.get() == "below" else 1
         try:
-            self.tune.start(self.tune_power_var.get(), sign, self.offset_var.get())
+            self.tune.start(self.tune_power_var.get(), sign, self.offset_var.get(), self._power_for_mode)
         except Exception as exc:  # noqa: BLE001 - a Tk callback exception is otherwise
             # invisible in a --windowed build (no console for the traceback), so
             # anything going wrong here must be caught and shown, not just CatError.
@@ -3065,11 +3094,6 @@ class App(tk.Tk):
             f"({self.tune.saved_mode}-Bandbreite {abs(offset)} Hz), "
             f"{self.tune_power_var.get():g} {self._power_unit_label()} CW"
         )
-        if self.tune.power_unreadable:
-            self._log(
-                "Hinweis: Rig-Backend meldet kein RFPOWER-Level zurück - "
-                "ursprüngliche Leistung wird nach TUNE nicht wiederhergestellt."
-            )
 
     def _on_tune_release(self, _event) -> None:
         if not self.tune.active:
