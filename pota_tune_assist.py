@@ -601,7 +601,7 @@ class Ft710Cat:
         if self._ser is not None:
             try:
                 self._ser.close()
-            except serial.SerialException:
+            except (serial.SerialException, OSError):
                 pass
         self._ser = None
 
@@ -611,7 +611,11 @@ class Ft710Cat:
 
     def _write(self, text: str) -> None:
         assert self._ser is not None
-        self._ser.write(text.encode("ascii"))
+        try:
+            self._ser.write(text.encode("ascii"))
+        except (serial.SerialException, OSError) as exc:
+            self.disconnect()
+            raise CatError(f"Funkgerät nicht mehr erreichbar (Kabel gezogen?): {exc}") from exc
         self._trace_add(f"TX {text!r}")
         time.sleep(CAT_CMD_DELAY)
 
@@ -619,20 +623,30 @@ class Ft710Cat:
         if not self.connected:
             raise CatError("Funkgerät nicht verbunden")
         assert self._ser is not None
-        stray = self._ser.in_waiting
-        self._ser.reset_input_buffer()
-        self._ser.write(cmd.encode("ascii"))
-        deadline = time.monotonic() + timeout
-        buf = bytearray()
-        while time.monotonic() < deadline:
-            chunk = self._ser.read(64)
-            if chunk:
-                buf.extend(chunk)
-                if buf.endswith(b";"):
-                    reply = buf.decode("ascii", errors="replace")
-                    stray_note = f" [{stray} Byte vor der Anfrage verworfen]" if stray else ""
-                    self._trace_add(f"TX {cmd!r} -> RX {reply!r}{stray_note}")
-                    return reply
+        try:
+            stray = self._ser.in_waiting
+            self._ser.reset_input_buffer()
+            self._ser.write(cmd.encode("ascii"))
+            deadline = time.monotonic() + timeout
+            buf = bytearray()
+            while time.monotonic() < deadline:
+                chunk = self._ser.read(64)
+                if chunk:
+                    buf.extend(chunk)
+                    if buf.endswith(b";"):
+                        reply = buf.decode("ascii", errors="replace")
+                        stray_note = f" [{stray} Byte vor der Anfrage verworfen]" if stray else ""
+                        self._trace_add(f"TX {cmd!r} -> RX {reply!r}{stray_note}")
+                        return reply
+        except (serial.SerialException, OSError) as exc:
+            # Physically unplugging the USB-serial adapter mid-session
+            # doesn't clear is_open on its own - the stale handle would
+            # otherwise keep reporting "connected" forever, and every
+            # command against it would keep failing the same way even
+            # after the cable is plugged back in (a fresh Serial object/
+            # OS handle is needed either way, see connect()).
+            self.disconnect()
+            raise CatError(f"Funkgerät nicht mehr erreichbar (Kabel gezogen?): {exc}") from exc
         self._trace_add(f"TX {cmd!r} -> TIMEOUT (bisher empfangen: {bytes(buf)!r})")
         raise CatError(f"Zeitüberschreitung bei Antwort auf {cmd!r}")
 
