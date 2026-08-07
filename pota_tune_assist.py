@@ -1312,6 +1312,7 @@ COL_AMBER = "#b58c2b"
 COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
 COL_WORKED_BG = "#0a1a0a"
+COL_QSY_BG = "#1b4f72"
 
 
 def apply_dark_titlebar(window) -> bool:
@@ -1390,6 +1391,10 @@ class App(tk.Tk):
         self.spots: list[Spot] = []
         self.skipped_ids: set[int] = set()
         self.logged_spot_ids: set[int] = set()
+        # Last spot QSY'd to - kept highlighted across refreshes/re-sorts
+        # until a different spot is QSY'd to, so it doesn't get lost when
+        # the list re-sorts it further down.
+        self.qsy_spot_id: int | None = None
         self.worked_today_index: dict[str, list[dict[str, str]]] = {}
         self.auto_refresh = True
         self.priority_alert_enabled = True
@@ -1635,6 +1640,16 @@ class App(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
+        # ttk.Treeview resolves conflicting tag options (e.g. two tags on
+        # the same row both setting "background") by which tag was
+        # tag_configure()'d *first* - NOT by the order tags are listed in
+        # a given row's own tags tuple in _render_spots(). "qsy_current"
+        # is configured before every other row tag so the currently
+        # QSY'd-to spot always stays visually findable, even on a
+        # favorite/outdoor row, and survives refreshes/re-sorts that would
+        # otherwise move it out of sight with no way to tell which row it
+        # was.
+        self.tree.tag_configure("qsy_current", background=COL_QSY_BG)
         self.tree.tag_configure("cw_even", background=COL_ROW_EVEN, foreground=COL_ACCENT)
         self.tree.tag_configure("cw_odd", background=COL_ROW_ODD, foreground=COL_ACCENT)
         self.tree.tag_configure("ssb_even", background=COL_ROW_EVEN, foreground=COL_TEXT)
@@ -1646,9 +1661,7 @@ class App(tk.Tk):
         # Listed after the mode/invalid/logged tags on favorite/outdoor rows
         # so their background wins while the other tag's foreground (mode
         # color, red for invalid, ...) still shows through - only
-        # background+font are set here, on purpose. "favorite" is applied
-        # after "outdoor" in _render_spots() so a row that is both wins
-        # the gold favorite look.
+        # background+font are set here, on purpose.
         # No bold font override here (unlike "favorite" below): forcing a
         # bold weight makes Tk fall back to a monochrome glyph for the 🏕
         # emoji on Windows instead of the full-color one, since the color
@@ -2740,6 +2753,8 @@ class App(tk.Tk):
                 tags += ("outdoor",)
             if is_fav:
                 tags += ("favorite",)
+            if spot.spot_id == self.qsy_spot_id:
+                tags += ("qsy_current",)
 
             self.tree.insert("", "end", iid=str(spot.spot_id), tags=tags, values=(
                 fav_icon,
@@ -2868,6 +2883,8 @@ class App(tk.Tk):
             f"QSY zu {spot.activator}: Ziel {spot.freq_hz} Hz ({mode_name}) - "
             f"Funkgerät bestätigt {confirmed_freq} Hz ({confirmed_mode}) - {spot.reference}"
         )
+        self.qsy_spot_id = spot_id
+        self._render_spots()
 
     # -- log contact ------------------------------------------------------------
 
