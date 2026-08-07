@@ -1193,6 +1193,11 @@ MAP_DEFAULT_LAT = 20.0
 MAP_DEFAULT_LON = 0.0
 MAP_DEFAULT_ZOOM = 2
 
+# CARTO's free "Dark Matter" basemap (© OpenStreetMap contributors, © CARTO)
+# instead of tkintermapview's light-themed OSM default, to match the rest
+# of the app's dark UI instead of a bright rectangle punched into it.
+MAP_TILE_SERVER_DARK = "https://a.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
+
 
 class QrzXmlError(Exception):
     pass
@@ -2787,8 +2792,9 @@ class App(tk.Tk):
             font=("Segoe UI", 8), anchor="w",
         ).pack(fill="x", pady=(0, 2))
 
-        self.map_widget = tkintermapview.TkinterMapView(parent, corner_radius=0)
+        self.map_widget = tkintermapview.TkinterMapView(parent, corner_radius=0, bg_color=COL_BG)
         self.map_widget.pack(fill="both", expand=True)
+        self.map_widget.set_tile_server(MAP_TILE_SERVER_DARK, max_zoom=20)
         self.map_widget.set_position(MAP_DEFAULT_LAT, MAP_DEFAULT_LON)
         self.map_widget.set_zoom(MAP_DEFAULT_ZOOM)
 
@@ -2840,8 +2846,13 @@ class App(tk.Tk):
             marker = self.map_widget.set_marker(
                 lat, lon, text=spot.activator,
                 marker_color_circle=COL_RED, marker_color_outside=COL_RED, text_color=COL_RED,
+                command=self._on_map_marker_click, data=spot.spot_id,
             )
             self.spot_markers.append(marker)
+
+    def _on_map_marker_click(self, marker) -> None:
+        if marker.data is not None:
+            self._qsy_to_spot_id(marker.data)
 
     def _spot_distance_km(self, spot: Spot) -> float | None:
         if not self._qrz_xml_ready():
