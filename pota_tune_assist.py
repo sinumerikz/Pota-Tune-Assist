@@ -2872,9 +2872,13 @@ class App(tk.Tk):
         if latlon is None:
             return
         lat, lon = latlon
+        # No text label here on purpose: this marker sits at a fixed spot
+        # every QSY line starts from, so a permanent label there would
+        # collide with the km-distance label on almost every line (see
+        # _update_qsy_line) - color + size (see MAP_OWN_MARKER_DIAMETER)
+        # already distinguish it from spot markers.
         self.own_qth_marker = self.map_widget.set_marker(
-            lat, lon, text="Eigener Standort",
-            icon=self._map_icon_own, icon_anchor="center", text_color=COL_ACCENT,
+            lat, lon, icon=self._map_icon_own, icon_anchor="center",
         )
         self.map_widget.set_position(lat, lon)
 
@@ -2951,12 +2955,21 @@ class App(tk.Tk):
         self._qsy_line_dash_offset = 0
         self._animate_qsy_line()
 
-        mid_lat = (my_latlon[0] + target_latlon[0]) / 2
-        mid_lon = (my_latlon[1] + target_latlon[1]) / 2
+        # Geometric midpoint, but lifted well above the line via
+        # text_y_offset below - own-QTH marker has no text of its own
+        # (see _update_own_qth_marker) so sitting at 50% no longer collides
+        # with anything there, and staying centered (rather than biased
+        # toward either end) keeps clear of both the spot's own label and
+        # the dashed line itself.
+        label_frac = 0.5
+        label_lat = my_latlon[0] + (target_latlon[0] - my_latlon[0]) * label_frac
+        label_lon = my_latlon[1] + (target_latlon[1] - my_latlon[1]) * label_frac
         self.qsy_line_label = self.map_widget.set_marker(
-            mid_lat, mid_lon, text=f"{km:.0f} km",
+            label_lat, label_lon, text=f"{km:.0f} km",
             icon=self._map_icon_blank, icon_anchor="center", text_color=COL_ACCENT,
         )
+        self.qsy_line_label.text_y_offset = -18
+        self.qsy_line_label.draw()
 
     def _animate_qsy_line(self) -> None:
         if self.qsy_line is None or self.qsy_line.canvas_line is None:
