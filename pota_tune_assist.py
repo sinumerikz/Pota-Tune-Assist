@@ -64,6 +64,7 @@ from tkinter import filedialog, messagebox, ttk
 
 import requests
 import serial
+import tkintermapview
 import serial.tools.list_ports
 
 POTA_SPOTS_URL = "https://api.pota.app/spot/activator"
@@ -1186,6 +1187,12 @@ QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
 LOCATOR_WORKER_COUNT = 12
 QRZ_CACHE_TTL_DAYS = 30
 
+# Fallback world view for the map panel, used only until an own QTH locator
+# is known (see _update_own_qth_marker(), which then recenters on it).
+MAP_DEFAULT_LAT = 20.0
+MAP_DEFAULT_LON = 0.0
+MAP_DEFAULT_ZOOM = 2
+
 
 class QrzXmlError(Exception):
     pass
@@ -1722,6 +1729,17 @@ class App(tk.Tk):
         self.tree_area = tk.Frame(table_frame, bg=COL_BG)
         self.tree_area.pack(side="left", fill="both", expand=True)
 
+        # Spot list on top, world map below - a vertical PanedWindow instead
+        # of a fixed split so the map doesn't permanently eat into the
+        # list's space on smaller windows; drag the sash to resize.
+        vertical_split = ttk.PanedWindow(self.tree_area, orient="vertical")
+        vertical_split.pack(fill="both", expand=True)
+
+        list_pane = tk.Frame(vertical_split, bg=COL_BG)
+        map_pane = tk.Frame(vertical_split, bg=COL_BG, height=260)
+        vertical_split.add(list_pane, weight=3)
+        vertical_split.add(map_pane, weight=1)
+
         columns = (
             "fav", "outdoor", "qsy", "call", "op", "worked", "freq", "mode", "ref", "name", "loc",
             "dist", "age", "skip", "log",
@@ -1738,7 +1756,7 @@ class App(tk.Tk):
         self.column_headers = headers
         self.all_columns = columns
         sortable_columns = {"call", "op", "worked", "freq", "mode", "ref", "name", "loc", "dist", "age"}
-        self.tree = ttk.Treeview(self.tree_area, columns=columns, show="headings", height=18)
+        self.tree = ttk.Treeview(list_pane, columns=columns, show="headings", height=18)
         for col in columns:
             if col in sortable_columns:
                 self.tree.heading(col, text=headers[col], command=lambda c=col: self._sort_by_column(c))
@@ -1748,11 +1766,13 @@ class App(tk.Tk):
             self.tree.column(col, width=widths[col], anchor=anchor)
         self._update_qrz_column_visibility()
 
-        vsb = ttk.Scrollbar(self.tree_area, orient="vertical", command=self.tree.yview,
+        vsb = ttk.Scrollbar(list_pane, orient="vertical", command=self.tree.yview,
                              style="Dark.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=vsb.set)
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
+
+        self._build_map_panel(map_pane)
 
         # ttk.Treeview resolves conflicting tag options (e.g. two tags on
         # the same row both setting "background") by which tag was
@@ -2153,6 +2173,8 @@ class App(tk.Tk):
         self.qrz_xml_auth_failed = False
         self.qrz_xml_client.session_key = None
         self._update_qrz_column_visibility()
+        self._update_own_qth_marker()
+        self._update_map_hint()
         self._log("Log-/QRZ-Einstellungen gespeichert.")
 
     # -- rigctld model list / auto-launch --------------------------------------
@@ -2751,6 +2773,71 @@ class App(tk.Tk):
             c for c in self.all_columns if show_qrz_columns or c not in qrz_only_columns
         ]
 
+    # -- world map ------------------------------------------------------------
+
+    def _build_map_panel(self, parent: tk.Frame) -> None:
+        self.map_hint_var = tk.StringVar(value="")
+        tk.Label(
+            parent, textvariable=self.map_hint_var, fg=COL_MUTED, bg=COL_BG,
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(fill="x", pady=(0, 2))
+
+        self.map_widget = tkintermapview.TkinterMapView(parent, corner_radius=0)
+        self.map_widget.pack(fill="both", expand=True)
+        self.map_widget.set_position(MAP_DEFAULT_LAT, MAP_DEFAULT_LON)
+        self.map_widget.set_zoom(MAP_DEFAULT_ZOOM)
+
+        self.own_qth_marker = None
+        self.spot_markers: list = []
+        self._update_own_qth_marker()
+        self._update_map_hint()
+
+    def _update_map_hint(self) -> None:
+        # Red (other-spot) markers need the same paid QRZ XML lookup as the
+        # OP/KM columns - own-location green marker works without it, so
+        # this only explains why the map might be showing green alone.
+        self.map_hint_var.set(
+            "" if self._qrz_xml_ready() else
+            "Rote Punkte (Aktivatoren) brauchen QRZ-XML-Zugangsdaten in den Settings."
+        )
+
+    def _update_own_qth_marker(self) -> None:
+        if self.own_qth_marker is not None:
+            self.own_qth_marker.delete()
+            self.own_qth_marker = None
+        latlon = grid_to_latlon(self.my_grid_var.get())
+        if latlon is None:
+            return
+        lat, lon = latlon
+        self.own_qth_marker = self.map_widget.set_marker(
+            lat, lon, text="Eigener Standort",
+            marker_color_circle=COL_ACCENT, marker_color_outside=COL_ACCENT, text_color=COL_ACCENT,
+        )
+        self.map_widget.set_position(lat, lon)
+
+    def _update_map_markers(self, visible_spots: list[Spot]) -> None:
+        for marker in self.spot_markers:
+            marker.delete()
+        self.spot_markers = []
+        self._update_map_hint()
+        if not self._qrz_xml_ready():
+            return
+        plotted: set[str] = set()
+        for spot in visible_spots:
+            base_call = base_callsign_for_lookup(spot.activator)
+            if not base_call or base_call in plotted:
+                continue
+            info = self.locator_cache.get(base_call)
+            if not info or not info.latlon:
+                continue
+            plotted.add(base_call)
+            lat, lon = info.latlon
+            marker = self.map_widget.set_marker(
+                lat, lon, text=spot.activator,
+                marker_color_circle=COL_RED, marker_color_outside=COL_RED, text_color=COL_RED,
+            )
+            self.spot_markers.append(marker)
+
     def _spot_distance_km(self, spot: Spot) -> float | None:
         if not self._qrz_xml_ready():
             return None
@@ -2905,6 +2992,7 @@ class App(tk.Tk):
                 "📝 Log",
             ))
         self.count_badge_var.set(f"{len(visible)} Spots")
+        self._update_map_markers(visible)
 
     def _on_tree_click(self, event) -> None:
         row_id = self.tree.identify_row(event.y)

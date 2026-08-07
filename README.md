@@ -52,6 +52,12 @@ QRZ-Upload – alles in einer Oberfläche.
   nötig); OP erscheint mit QRZ-Zugangsdaten in den Settings, KM zusätzlich
   mit eigenem Locator, sonst bleiben beide komplett ausgeblendet und es
   werden keine Abfragen ausgeführt.
+- **Weltkarte** – echte, zoom-/verschiebbare OpenStreetMap-Ansicht unterhalb
+  der Spot-Liste (Größe per Ziehen an der Trennlinie anpassbar). Eigener
+  Standort als grüner Marker (aus dem Locator in den Settings), sichtbare
+  Spots als rote Marker – nutzt dieselben QRZ-XML-Koordinaten wie die
+  KM-Spalte, braucht also dieselben QRZ-Zugangsdaten; ohne die bleibt nur
+  der eigene grüne Marker sichtbar (Hinweistext unter der Karte).
 - **Sonnendaten (SFI/K/A/MUF)** – Badge oben rechts, alle 15 Minuten
   aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
