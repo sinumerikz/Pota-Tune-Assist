@@ -344,9 +344,13 @@ def load_worked_today() -> dict[str, list[dict[str, str]]]:
 
 def worked_today_badge(spot: "Spot", worked_index: dict[str, list[dict[str, str]]]) -> str:
     """"" (nothing worked today), "DUPE" (exact band+mode+park already
-    logged today), or "New <Band/Mode/Park> (mode freq park)" for a spot
-    whose band, mode, or park hasn't been logged yet today for this call
-    - only meaningful once the call has at least one QSO logged today."""
+    logged today), or "New <Band/Mode/Park> (bisher: band/mode, ...)" for a
+    spot whose band, mode, or park hasn't been logged yet today for this
+    call - only meaningful once the call has at least one QSO logged today.
+    The parenthetical lists what WAS already worked today, not the current
+    spot's own band/mode/freq (that's redundant - it's already shown in the
+    spot row's own columns; what's actually useful here is what to compare
+    it against)."""
     call = (spot.activator or "").strip().upper()
     records = worked_index.get(call)
     if not records:
@@ -377,8 +381,10 @@ def worked_today_badge(spot: "Spot", worked_index: dict[str, list[dict[str, str]
         new_dims.append("Park")
     if not new_dims:
         return ""
-    return f"New {'/'.join(new_dims)} ({mode} {spot.frequency_khz:.1f} {park})"
-    return path
+    prior_band_modes = sorted({
+        f"{r.get('BAND', '').strip()}/{r.get('MODE', '').strip().upper()}" for r in records
+    })
+    return f"New {'/'.join(new_dims)} (bisher: {', '.join(prior_band_modes)})"
 
 
 def upload_to_qrz(api_key: str, adif_record: str) -> tuple[bool, str]:
