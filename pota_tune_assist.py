@@ -344,6 +344,45 @@ def load_worked_today() -> dict[str, list[dict[str, str]]]:
     return index
 
 
+def load_all_adif_records() -> list[dict[str, str]]:
+    """Every QSO this app has ever logged (every daily ADIF file in
+    LOG_DIR) - unlike load_worked_today() this isn't scoped to a single
+    day, it's the source for the all-time stats panel."""
+    if not LOG_DIR.is_dir():
+        return []
+    records: list[dict[str, str]] = []
+    for path in sorted(LOG_DIR.glob("pota_tune_assist_log_*.adi")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        records.extend(parse_adif_records(text))
+    return records
+
+
+def compute_band_mode_park_stats(records: list[dict[str, str]]) -> dict:
+    """Aggregates logged QSOs into unique-park counts per band and mode
+    category (cw/ssb/digital) for the stats panel - unique parks worked,
+    not raw QSO counts, since that's what actually matters for POTA
+    hunter awards (working the same park twice on the same band/mode
+    doesn't count twice)."""
+    band_mode_parks: dict[str, dict[str, set[str]]] = {}
+    all_parks: set[str] = set()
+    for rec in records:
+        band = rec.get("BAND", "").strip().lower()
+        park = rec.get("SIG_INFO", "").strip()
+        if not band or not park:
+            continue
+        category = mode_category(rec.get("MODE", ""))
+        band_mode_parks.setdefault(band, {"cw": set(), "ssb": set(), "digital": set()})[category].add(park)
+        all_parks.add(park)
+    return {
+        "total_qsos": len(records),
+        "total_parks": len(all_parks),
+        "band_mode_parks": band_mode_parks,
+    }
+
+
 def worked_today_badge(spot: "Spot", worked_index: dict[str, list[dict[str, str]]]) -> str:
     """"" (nothing worked today), "DUPE" (exact band+mode+park already
     logged today), or "New <Band/Mode/Park> (bisher: band/mode, ...)" for a
@@ -1819,7 +1858,19 @@ class App(tk.Tk):
         self.tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        self._build_map_panel(map_pane)
+        # Map on the left, stats panel on the right - a second, horizontal
+        # PanedWindow nested inside map_pane so both are independently
+        # resizable (drag the vertical divider to trade space between the
+        # two, same as the list/map split above).
+        horizontal_split = ttk.PanedWindow(map_pane, orient="horizontal")
+        horizontal_split.pack(fill="both", expand=True)
+        map_widget_pane = tk.Frame(horizontal_split, bg=COL_BG)
+        stats_pane = tk.Frame(horizontal_split, bg=COL_BG, width=320)
+        horizontal_split.add(map_widget_pane, weight=3)
+        horizontal_split.add(stats_pane, weight=1)
+
+        self._build_map_panel(map_widget_pane)
+        self._build_stats_panel(stats_pane)
 
         # ttk.Treeview resolves conflicting tag options (e.g. two tags on
         # the same row both setting "background") by which tag was
@@ -2920,6 +2971,65 @@ class App(tk.Tk):
         if marker.data is not None:
             self._qsy_to_spot_id(marker.data)
 
+    # -- hunter stats -----------------------------------------------------------
+
+    def _build_stats_panel(self, parent: tk.Frame) -> None:
+        header_row = tk.Frame(parent, bg=COL_BG)
+        header_row.pack(fill="x", pady=(0, 4))
+        tk.Label(header_row, text="Statistik", fg=COL_ACCENT, bg=COL_BG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left")
+        _chip_button(header_row, "↻", command=self._refresh_stats).pack(side="right")
+
+        self.stats_summary_var = tk.StringVar(value="")
+        tk.Label(
+            parent, textvariable=self.stats_summary_var, fg=COL_MUTED, bg=COL_BG,
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        ).pack(fill="x", pady=(0, 4))
+
+        columns = ("band", "cw", "ssb", "digital", "total")
+        headers = {"band": "Band", "cw": "CW", "ssb": "SSB", "digital": "Digital", "total": "Gesamt"}
+        widths = {"band": 55, "cw": 45, "ssb": 45, "digital": 55, "total": 55}
+        self.stats_tree = ttk.Treeview(parent, columns=columns, show="headings", height=12)
+        for col in columns:
+            self.stats_tree.heading(col, text=headers[col])
+            self.stats_tree.column(col, width=widths[col], anchor="w" if col == "band" else "center")
+        self.stats_tree.pack(fill="both", expand=True)
+        self.stats_tree.tag_configure("stats_total", foreground=COL_ACCENT, font=("Segoe UI", 10, "bold"))
+
+        tk.Label(
+            parent, text="Eindeutige Parks je Band/Mode aus dem eigenen ADIF-Log (alle Tage).",
+            fg=COL_MUTED, bg=COL_BG, font=("Segoe UI", 7), anchor="w", justify="left", wraplength=300,
+        ).pack(fill="x", pady=(4, 0))
+
+        self._refresh_stats()
+
+    def _refresh_stats(self) -> None:
+        if not hasattr(self, "stats_tree"):
+            return
+        stats = compute_band_mode_park_stats(load_all_adif_records())
+        self.stats_summary_var.set(
+            f"{stats['total_parks']} eindeutige Parks - {stats['total_qsos']} QSOs gesamt"
+        )
+
+        self.stats_tree.delete(*self.stats_tree.get_children())
+        band_mode_parks = stats["band_mode_parks"]
+        for _, _, band in BAND_RANGES_KHZ:
+            per_mode = band_mode_parks.get(band)
+            if not per_mode:
+                continue
+            total = len(per_mode["cw"] | per_mode["ssb"] | per_mode["digital"])
+            self.stats_tree.insert("", "end", values=(
+                band, len(per_mode["cw"]), len(per_mode["ssb"]), len(per_mode["digital"]), total,
+            ))
+
+        if band_mode_parks:
+            all_cw = set().union(*(v["cw"] for v in band_mode_parks.values()))
+            all_ssb = set().union(*(v["ssb"] for v in band_mode_parks.values()))
+            all_digital = set().union(*(v["digital"] for v in band_mode_parks.values()))
+            self.stats_tree.insert("", "end", tags=("stats_total",), values=(
+                "Gesamt", len(all_cw), len(all_ssb), len(all_digital), stats["total_parks"],
+            ))
+
     # -- QSY great-circle line ------------------------------------------------
 
     def _clear_qsy_line(self) -> None:
@@ -3375,6 +3485,7 @@ class App(tk.Tk):
 
         self.logged_spot_ids.add(spot_id)
         self._refresh_worked_today()
+        self._refresh_stats()
 
         api_key = self.qrz_api_key_var.get().strip()
         if api_key:
