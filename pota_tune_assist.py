@@ -3108,10 +3108,8 @@ class App(tk.Tk):
         self.stats_filter = "all"
         self.stats_filter_btns: dict[str, tk.Button] = {}
         for key, label in (("today", "Heute"), ("yesterday", "Gestern"), ("all", "Gesamt")):
-            btn = _chip_button(
-                filter_row, label, command=lambda k=key: self._set_stats_filter(k),
-                padx=10, pady=3, font=("Segoe UI", 8, "bold"),
-            )
+            btn = _chip_button(filter_row, label, command=lambda k=key: self._set_stats_filter(k))
+            btn.configure(padx=10, pady=3, font=("Segoe UI", 8, "bold"))
             btn.pack(side="left", padx=(0, 4))
             self.stats_filter_btns[key] = btn
         self._update_stats_filter_buttons()
