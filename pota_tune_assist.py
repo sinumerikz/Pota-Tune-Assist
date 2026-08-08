@@ -1577,8 +1577,13 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("POTA Tune Assist")
-        self.geometry("1320x680")
-        self.minsize(1180, 560)
+        # Taller than before the map/stats panel was added - that content
+        # has its own real minimum height (see list_pane/map_pane
+        # pack_propagate(False) below), and at the old 680/560 heights it
+        # silently pushed the TUNE bar and status bar completely off the
+        # bottom of the window instead of just cramping the spot list.
+        self.geometry("1320x820")
+        self.minsize(1180, 700)
         self.configure(bg=COL_BG)
         self._dark_titlebar_ok = apply_dark_titlebar(self)
         # Some Windows builds only pick up the DWM attribute once the window
@@ -1821,8 +1826,19 @@ class App(tk.Tk):
         vertical_split = ttk.PanedWindow(self.tree_area, orient="vertical")
         vertical_split.pack(fill="both", expand=True)
 
-        list_pane = tk.Frame(vertical_split, bg=COL_BG)
-        map_pane = tk.Frame(vertical_split, bg=COL_BG, height=260)
+        # pack_propagate(False) + a fixed starting height on both panes is
+        # load-bearing, not cosmetic: without it, ttk.PanedWindow reports
+        # its *children's own natural content size* (18-row spot list +
+        # map/stats) as its requested size, which can exceed the actual
+        # window height - Tk then has nowhere to shrink that to and simply
+        # overflows the window, silently pushing the TUNE bar/status bar
+        # below the visible area instead of just cramping this split. The
+        # user can still freely resize both panes afterward by dragging
+        # the sash; this only fixes the *starting* sizes.
+        list_pane = tk.Frame(vertical_split, bg=COL_BG, height=320)
+        list_pane.pack_propagate(False)
+        map_pane = tk.Frame(vertical_split, bg=COL_BG, height=220)
+        map_pane.pack_propagate(False)
         vertical_split.add(list_pane, weight=3)
         vertical_split.add(map_pane, weight=1)
 
@@ -2986,14 +3002,24 @@ class App(tk.Tk):
             font=("Segoe UI", 8), anchor="w", justify="left",
         ).pack(fill="x", pady=(0, 4))
 
+        stats_tree_frame = tk.Frame(parent, bg=COL_BG)
+        stats_tree_frame.pack(fill="both", expand=True)
+
         columns = ("band", "cw", "ssb", "digital", "total")
         headers = {"band": "Band", "cw": "CW", "ssb": "SSB", "digital": "Digital", "total": "Gesamt"}
         widths = {"band": 55, "cw": 45, "ssb": 45, "digital": 55, "total": 55}
-        self.stats_tree = ttk.Treeview(parent, columns=columns, show="headings", height=12)
+        # height=6 is just the *starting* visible row count, not a cap -
+        # up to 11 bands + a totals row can exist, reachable via the
+        # scrollbar rather than silently invisible.
+        self.stats_tree = ttk.Treeview(stats_tree_frame, columns=columns, show="headings", height=6)
         for col in columns:
             self.stats_tree.heading(col, text=headers[col])
             self.stats_tree.column(col, width=widths[col], anchor="w" if col == "band" else "center")
-        self.stats_tree.pack(fill="both", expand=True)
+        stats_vsb = ttk.Scrollbar(stats_tree_frame, orient="vertical", command=self.stats_tree.yview,
+                                   style="Dark.Vertical.TScrollbar")
+        self.stats_tree.configure(yscrollcommand=stats_vsb.set)
+        self.stats_tree.pack(side="left", fill="both", expand=True)
+        stats_vsb.pack(side="right", fill="y")
         self.stats_tree.tag_configure("stats_total", foreground=COL_ACCENT, font=("Segoe UI", 10, "bold"))
 
         tk.Label(
