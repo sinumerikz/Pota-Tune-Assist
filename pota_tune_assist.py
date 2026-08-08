@@ -1366,6 +1366,32 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def destination_point_km(lat: float, lon: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    """Point reached from (lat, lon) after travelling distance_km along a
+    great circle on bearing_deg (0 = north, clockwise) - the standard
+    spherical "direct" geodesic problem, inverse of haversine_km. Used to
+    build the "how far is this activator being heard" ring (see
+    circle_points_km) point by point."""
+    r = 6371.0
+    lat1, lon1, brng = math.radians(lat), math.radians(lon), math.radians(bearing_deg)
+    d_r = distance_km / r
+    lat2 = math.asin(math.sin(lat1) * math.cos(d_r) + math.cos(lat1) * math.sin(d_r) * math.cos(brng))
+    lon2 = lon1 + math.atan2(
+        math.sin(brng) * math.sin(d_r) * math.cos(lat1),
+        math.cos(d_r) - math.sin(lat1) * math.sin(lat2),
+    )
+    return math.degrees(lat2), (math.degrees(lon2) + 540) % 360 - 180  # normalize to [-180, 180]
+
+
+def circle_points_km(lat: float, lon: float, radius_km: float, segments: int = 72) -> list[tuple[float, float]]:
+    """Points approximating a geodesic circle of radius_km around (lat, lon)
+    - a real circle-on-the-sphere, not a lat/lon ellipse, so it stays round
+    close to the poles too (irrelevant for ham bands, but free to get
+    right). The map widget's polygon closes itself, so no need to repeat
+    the first point at the end."""
+    return [destination_point_km(lat, lon, bearing, radius_km) for bearing in range(0, 360, 360 // segments)]
+
+
 QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
 LOCATOR_WORKER_COUNT = 12
 QRZ_CACHE_TTL_DAYS = 30
@@ -1445,6 +1471,12 @@ RBN_PRUNE_INTERVAL_SECONDS = 60.0
 # Skimmers this close count as "my region" - i.e. what they hear is a fair
 # proxy for what my own station can hear.
 RBN_REGION_RADIUS_KM = 1200.0
+
+# Map "how far is this activator being heard" ring, drawn around the park
+# on QSY: number of points approximating the geodesic circle (see
+# circle_points_km) - plenty smooth at any zoom level actually usable on a
+# desktop map, without generating an excessive canvas polygon.
+RBN_HEAR_CIRCLE_SEGMENTS = 72
 # Within that region, reports are still distance-weighted: a skimmer
 # RBN_WEIGHT_HALF_KM away counts half as much as one at my own QTH.
 RBN_WEIGHT_HALF_KM = 400.0
@@ -1744,9 +1776,12 @@ class RbnStore:
             # last one written: prune() drops a whole bucket whose touch
             # time has aged out, so letting an out-of-order (older) report
             # move it backwards would discard the fresh reports next to it.
-            self._bucket_touched[key] = max(self._bucket_touched.get(key, 0.0), report.heard_at)
+            # -inf (not 0.0) as the "first time seen" default: time.monotonic()
+            # is only guaranteed monotonic, not positive, so 0.0 is not a
+            # safe stand-in for "older than anything real".
+            self._bucket_touched[key] = max(self._bucket_touched.get(key, float("-inf")), report.heard_at)
             self._skimmers_seen[report.skimmer] = max(
-                self._skimmers_seen.get(report.skimmer, 0.0), report.heard_at
+                self._skimmers_seen.get(report.skimmer, float("-inf")), report.heard_at
             )
 
     def reports_for(self, call: str, band: str) -> list[RbnReport]:
@@ -2392,6 +2427,7 @@ COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
 COL_WORKED_BG = "#0a1a0a"
 COL_QSY_BG = "#1b4f72"
+COL_HEAR_CIRCLE = "#e08a3c"
 
 
 def apply_dark_titlebar(window) -> bool:
@@ -3176,7 +3212,9 @@ class App(tk.Tk):
                       "zu den Skimmern) von oben gebraucht. Funktioniert nur für CW und\n"
                       "RTTY - dort schaut kein Skimmer hin, steht in der Spalte '–'.\n"
                       "'~' vor dem Wert = Schätzung, weil gerade kein Skimmer in deiner\n"
-                      "Nähe aktiv ist.",
+                      "Nähe aktiv ist. Per QSY zeigt die Karte zusätzlich einen Ring um\n"
+                      "den Park: wie weit der Aktivator laut RBN gerade maximal gehört\n"
+                      "wird.",
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
@@ -3881,6 +3919,8 @@ class App(tk.Tk):
         self.spot_markers: list = []
         self.qsy_line = None
         self.qsy_line_label = None
+        self.qsy_hear_circle = None
+        self.qsy_hear_circle_label = None
         self._qsy_line_animation_job = None
         self._qsy_line_dash_offset = 0
         self._update_own_qth_marker()
@@ -4062,11 +4102,19 @@ class App(tk.Tk):
         if self.qsy_line_label is not None:
             self.qsy_line_label.delete()
             self.qsy_line_label = None
+        if self.qsy_hear_circle is not None:
+            self.qsy_hear_circle.delete()
+            self.qsy_hear_circle = None
+        if self.qsy_hear_circle_label is not None:
+            self.qsy_hear_circle_label.delete()
+            self.qsy_hear_circle_label = None
 
     def _update_qsy_line(self, spot: Spot) -> None:
         """Draws an animated dashed line from the own QTH to the spot just
         QSY'd to, labelled with the great-circle-ish distance - same park
-        coordinates as the map markers and the KM column."""
+        coordinates as the map markers and the KM column. Also draws a ring
+        around the activator showing how far they're currently being heard
+        (see _draw_hear_circle) when RBN data for them is available."""
         self._clear_qsy_line()
         my_latlon = grid_to_latlon(self.my_grid_var.get())
         if my_latlon is None:
@@ -4096,6 +4144,47 @@ class App(tk.Tk):
         )
         self.qsy_line_label.text_y_offset = -18
         self.qsy_line_label.draw()
+
+        self._draw_hear_circle(spot, target_latlon)
+
+    def _draw_hear_circle(self, spot: Spot, center_latlon: tuple[float, float]) -> None:
+        """Ring around the activator's park at the distance of the
+        farthest-away RBN skimmer currently hearing them on this band - a
+        live, measured "how far does his signal actually reach right now"
+        indicator, not a modelled propagation contour. Requires the RBN
+        feature on and at least one located skimmer report; otherwise draws
+        nothing (silently - the HÖRCHANCE column's own '–'/'aus' already
+        covers explaining why)."""
+        if not self.rbn_enabled_var.get():
+            return
+        call = base_callsign_for_lookup(spot.activator)
+        band = band_for_khz(spot.frequency_khz)
+        if not call or band == "?":
+            return
+        farthest_km = 0.0
+        farthest_skimmer = ""
+        for report in self.rbn_store.reports_for(call, band):
+            skimmer_pos = skimmer_latlon(report.skimmer)
+            if skimmer_pos is None:
+                continue
+            dist = haversine_km(center_latlon[0], center_latlon[1], skimmer_pos[0], skimmer_pos[1])
+            if dist > farthest_km:
+                farthest_km = dist
+                farthest_skimmer = report.skimmer
+        if farthest_km <= 0:
+            return
+
+        points = circle_points_km(center_latlon[0], center_latlon[1], farthest_km, RBN_HEAR_CIRCLE_SEGMENTS)
+        self.qsy_hear_circle = self.map_widget.set_polygon(
+            points, outline_color=COL_HEAR_CIRCLE, fill_color=None, border_width=2,
+        )
+        label_lat, label_lon = destination_point_km(center_latlon[0], center_latlon[1], 0.0, farthest_km)
+        self.qsy_hear_circle_label = self.map_widget.set_marker(
+            label_lat, label_lon, text=f"max. gehört ~{farthest_km:.0f} km ({farthest_skimmer})",
+            icon=self._map_icon_blank, icon_anchor="center", text_color=COL_HEAR_CIRCLE,
+        )
+        self.qsy_hear_circle_label.text_y_offset = -10
+        self.qsy_hear_circle_label.draw()
 
     def _animate_qsy_line(self) -> None:
         if self.qsy_line is None or self.qsy_line.canvas_line is None:

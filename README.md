@@ -82,7 +82,13 @@ QRZ-Upload – alles in einer Oberfläche.
   Standort als grüner Marker (aus dem Locator in den Settings), sichtbare
   Spots als farbige Marker je Band – gesetzt auf die Koordinaten der
   Park-Referenz, also ohne QRZ-Abo für alle sichtbar. Mehrere Aktivatoren im
-  selben Park teilen sich einen Marker.
+  selben Park teilen sich einen Marker. Per QSY erscheint zusätzlich eine
+  gestrichelte Linie zum eigenen Standort mit Entfernung in km, und – bei
+  aktivierter Hörchance (siehe oben) und vorhandenen RBN-Meldungen für
+  diesen Aktivator – ein oranger Ring um den Park, der zeigt, wie weit er
+  laut RBN gerade tatsächlich gehört wird (Radius = Entfernung des
+  am weitesten entfernten meldenden Skimmers). Auch das ist eine reine
+  Momentaufnahme des aktuellen RBN-Datenstands, kein Ausbreitungsmodell.
 - **Sonnendaten (SFI/K/A/MUF)** – Badge oben rechts, alle 15 Minuten
   aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
