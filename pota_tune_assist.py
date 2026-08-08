@@ -41,6 +41,7 @@ power is a level, not watts.
 
 from __future__ import annotations
 
+import io
 import json
 import math
 import os
@@ -1259,6 +1260,86 @@ BAND_MAP_COLORS = {
     "6m": "#ECF0F1",
 }
 BAND_MAP_COLOR_DEFAULT = "#95A5A6"
+
+
+def _patch_tkintermapview_tile_loading() -> None:
+    """tkintermapview.TkinterMapView.request_image() fetches each tile with a
+    bare requests.get(...) that has no timeout, running on one of 25 daemon
+    worker threads. A single stalled connection (slow tile server, flaky
+    network) then blocks that worker forever, and a failed tile is cached
+    as a permanent blank image with no retry. Over a session, enough stalls
+    exhaust the worker pool and some tiles never get (re)loaded, leaving the
+    map with unfilled white/grey patches. This replaces request_image() with
+    a version that times out and retries transient failures a few times
+    before giving up, and - unlike the original - doesn't poison the cache
+    on a transient failure, so a later redraw can still fetch it fresh."""
+    map_widget_module = tkintermapview.map_widget
+    TkinterMapView = map_widget_module.TkinterMapView
+
+    def request_image_with_retry(self, zoom: int, x: int, y: int, db_cursor=None):
+        if db_cursor is not None:
+            try:
+                db_cursor.execute(
+                    "SELECT t.tile_image FROM tiles t WHERE t.zoom=? AND t.x=? AND t.y=? AND t.server=?;",
+                    (zoom, x, y, self.tile_server),
+                )
+                result = db_cursor.fetchone()
+
+                if result is not None:
+                    image = Image.open(io.BytesIO(result[0]))
+                    image_tk = ImageTk.PhotoImage(image)
+                    self.tile_image_cache[f"{zoom}{x}{y}"] = image_tk
+                    return image_tk
+                elif self.use_database_only:
+                    return self.empty_tile_image
+            except sqlite3.OperationalError:
+                if self.use_database_only:
+                    return self.empty_tile_image
+            except Exception:
+                return self.empty_tile_image
+
+        url = self.tile_server.replace("{x}", str(x)).replace("{y}", str(y)).replace("{z}", str(zoom))
+
+        attempts = 3
+        for attempt in range(attempts):
+            try:
+                response = requests.get(url, stream=True, headers={"User-Agent": "TkinterMapView"}, timeout=8)
+                image = Image.open(response.raw)
+
+                if self.overlay_tile_server is not None:
+                    overlay_url = self.overlay_tile_server.replace("{x}", str(x)).replace("{y}", str(y)).replace("{z}", str(zoom))
+                    overlay_response = requests.get(overlay_url, stream=True, headers={"User-Agent": "TkinterMapView"}, timeout=8)
+                    image_overlay = Image.open(overlay_response.raw)
+                    image = image.convert("RGBA")
+                    image_overlay = image_overlay.convert("RGBA")
+                    if image_overlay.size != (self.tile_size, self.tile_size):
+                        image_overlay = image_overlay.resize((self.tile_size, self.tile_size), Image.LANCZOS)
+                    image.paste(image_overlay, (0, 0), image_overlay)
+
+                if not self.running:
+                    return self.empty_tile_image
+
+                image_tk = ImageTk.PhotoImage(image)
+                self.tile_image_cache[f"{zoom}{x}{y}"] = image_tk
+                return image_tk
+
+            except Image.UnidentifiedImageError:
+                # no tile exists for these coordinates - retrying won't change that
+                self.tile_image_cache[f"{zoom}{x}{y}"] = self.empty_tile_image
+                return self.empty_tile_image
+
+            except Exception:
+                if attempt < attempts - 1:
+                    time.sleep(0.4 * (attempt + 1))
+                    continue
+                # give up for now, but leave the cache alone so a later
+                # redraw (pan/zoom back) gets a fresh attempt instead of a
+                # permanently blank tile
+                return self.empty_tile_image
+
+        return self.empty_tile_image
+
+    TkinterMapView.request_image = request_image_with_retry
 
 
 def _make_map_dot_icon(color: str, diameter: int) -> ImageTk.PhotoImage:
@@ -2896,6 +2977,7 @@ class App(tk.Tk):
             font=("Segoe UI", 8), anchor="w",
         ).pack(fill="x", pady=(0, 2))
 
+        _patch_tkintermapview_tile_loading()
         self.map_widget = tkintermapview.TkinterMapView(parent, corner_radius=0, bg_color=COL_BG)
         self.map_widget.pack(fill="both", expand=True)
         self.map_widget.set_tile_server(MAP_TILE_SERVER_DARK, max_zoom=20)
