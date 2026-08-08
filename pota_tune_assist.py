@@ -361,6 +361,31 @@ def load_all_adif_records() -> list[dict[str, str]]:
     return records
 
 
+def load_adif_records_for_day(qso_date: str) -> list[dict[str, str]]:
+    """QSOs logged on one UTC day (YYYYMMDD) - each day already has its own
+    log file (see daily_adif_path()), so this is just that single file."""
+    path = daily_adif_path(qso_date)
+    if not path.exists():
+        return []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return parse_adif_records(text)
+
+
+def load_adif_records_for_stats_filter(filter_key: str) -> list[dict[str, str]]:
+    """Records for the stats panel's Heute/Gestern/Gesamt filter. "today"
+    and "yesterday" are UTC calendar days, matching the UTC day boundary
+    daily_adif_path() already splits log files on."""
+    if filter_key == "today":
+        return load_adif_records_for_day(datetime.now(timezone.utc).strftime("%Y%m%d"))
+    if filter_key == "yesterday":
+        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+        return load_adif_records_for_day(yesterday.strftime("%Y%m%d"))
+    return load_all_adif_records()
+
+
 def compute_band_mode_park_stats(records: list[dict[str, str]]) -> dict:
     """Aggregates logged QSOs into unique-park counts per band and mode
     category (cw/ssb/digital) for the stats panel - unique parks worked,
@@ -3078,6 +3103,19 @@ class App(tk.Tk):
                  font=("Segoe UI", 10, "bold")).pack(side="left")
         _chip_button(header_row, "↻", command=self._refresh_stats).pack(side="right")
 
+        filter_row = tk.Frame(parent, bg=COL_BG)
+        filter_row.pack(fill="x", pady=(0, 4))
+        self.stats_filter = "all"
+        self.stats_filter_btns: dict[str, tk.Button] = {}
+        for key, label in (("today", "Heute"), ("yesterday", "Gestern"), ("all", "Gesamt")):
+            btn = _chip_button(
+                filter_row, label, command=lambda k=key: self._set_stats_filter(k),
+                padx=10, pady=3, font=("Segoe UI", 8, "bold"),
+            )
+            btn.pack(side="left", padx=(0, 4))
+            self.stats_filter_btns[key] = btn
+        self._update_stats_filter_buttons()
+
         self.stats_summary_var = tk.StringVar(value="")
         tk.Label(
             parent, textvariable=self.stats_summary_var, fg=COL_MUTED, bg=COL_BG,
@@ -3104,19 +3142,36 @@ class App(tk.Tk):
         stats_vsb.pack(side="right", fill="y")
         self.stats_tree.tag_configure("stats_total", foreground=COL_ACCENT, font=("Segoe UI", 10, "bold"))
 
+        self.stats_hint_var = tk.StringVar(value="")
         tk.Label(
-            parent, text="Eindeutige Parks je Band/Mode aus dem eigenen ADIF-Log (alle Tage).",
+            parent, textvariable=self.stats_hint_var,
             fg=COL_MUTED, bg=COL_BG, font=("Segoe UI", 7), anchor="w", justify="left", wraplength=300,
         ).pack(fill="x", pady=(4, 0))
 
         self._refresh_stats()
 
+    _STATS_FILTER_LABELS = {"today": "heute", "yesterday": "gestern", "all": "alle Tage"}
+
+    def _set_stats_filter(self, filter_key: str) -> None:
+        self.stats_filter = filter_key
+        self._update_stats_filter_buttons()
+        self._refresh_stats()
+
+    def _update_stats_filter_buttons(self) -> None:
+        for key, btn in self.stats_filter_btns.items():
+            active = key == self.stats_filter
+            btn.configure(fg=COL_ACCENT if active else COL_MUTED, bg=COL_BORDER if active else COL_PANEL_ALT)
+
     def _refresh_stats(self) -> None:
         if not hasattr(self, "stats_tree"):
             return
-        stats = compute_band_mode_park_stats(load_all_adif_records())
+        stats = compute_band_mode_park_stats(load_adif_records_for_stats_filter(self.stats_filter))
         self.stats_summary_var.set(
             f"{stats['total_parks']} eindeutige Parks - {stats['total_qsos']} QSOs gesamt"
+        )
+        self.stats_hint_var.set(
+            f"Eindeutige Parks je Band/Mode aus dem eigenen ADIF-Log "
+            f"({self._STATS_FILTER_LABELS[self.stats_filter]})."
         )
 
         self.stats_tree.delete(*self.stats_tree.get_children())
