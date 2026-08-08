@@ -44,20 +44,45 @@ QRZ-Upload – alles in einer Oberfläche.
   ist bei jedem Start wieder leer). "Skip" blendet einzelne Spots aus,
   "Alle anzeigen" setzt das zurück.
 - **Sortierbare Spalten** – Klick auf einen Spaltenkopf (CALLSIGN, OP, HEUTE,
-  FREQ, MODE, REF, NAME, LOC, KM, AGE) sortiert danach, erneuter Klick dreht
-  die Richtung um (▲/▼ im Spaltenkopf). ⭐-Favoriten und 🏕-Draußenfunker
-  bleiben dabei immer oben, unabhängig von der gewählten Sortierung.
-- **Name und Entfernung des Aktivators (OP/KM)** – optionale Spalten,
-  berechnet per QRZ.com-XML-Lookup (eigenes, kostenpflichtiges QRZ-Abo
-  nötig); OP erscheint mit QRZ-Zugangsdaten in den Settings, KM zusätzlich
-  mit eigenem Locator, sonst bleiben beide komplett ausgeblendet und es
-  werden keine Abfragen ausgeführt.
+  FREQ, MODE, REF, NAME, LOC, KM, HÖRCHANCE, AGE) sortiert danach, erneuter
+  Klick dreht die Richtung um (▲/▼ im Spaltenkopf). ⭐-Favoriten und
+  🏕-Draußenfunker bleiben dabei immer oben, unabhängig von der Sortierung.
+- **Entfernung zum Aktivator (KM)** – aus den Koordinaten der
+  **Park-Referenz**, die POTA zu jedem Spot mitliefert. Das ist der Ort, an
+  dem der Aktivator tatsächlich sitzt (die QRZ-Adresse wäre sein Zuhause),
+  kostet nichts und braucht kein QRZ-Abo – nur den eigenen Locator in den
+  Settings. Für die seltenen Parks ohne hinterlegte Position wird die
+  Referenz einmalig bei POTA nachgeschlagen und dauerhaft zwischen-
+  gespeichert; erst wenn auch das nichts liefert, springt (falls
+  konfiguriert) der QRZ-Lookup ein.
+- **Name des Aktivators (OP)** – optionale Spalte per QRZ.com-XML-Lookup
+  (eigenes, kostenpflichtiges QRZ-Abo nötig); ohne QRZ-Zugangsdaten in den
+  Settings bleibt die Spalte ausgeblendet und es werden keine Abfragen
+  ausgeführt.
+- **Hörchance (RBN)** – schätzt pro Spot ab, wie gut die Chance steht, den
+  Aktivator am eigenen Standort wirklich zu hören, z. B. `78 % gut` oder
+  `22 % schwach`. Grundlage ist das
+  [Reverse Beacon Network](https://www.reversebeacon.net/): weltweit
+  verteilte Skimmer-Empfänger, die laufend melden, welches Rufzeichen sie
+  mit welchem Signal-Rausch-Abstand hören. Die App verbindet sich mit dem
+  RBN-Telnet-Feed und wertet aus, was die Skimmer **in der eigenen Umgebung**
+  (bis 1200 km, nach Entfernung gewichtet) über genau diesen Aktivator auf
+  genau diesem Band melden – also eine gemessene Momentaufnahme der
+  Ausbreitung auf der eigenen Funkstrecke statt einer allgemeinen Vorhersage.
+  Kostenlos und ohne Anmeldung; gebraucht werden nur das eigene Rufzeichen
+  (dient als Login) und der eigene Locator. Da die Skimmer nur CW und RTTY
+  dekodieren, steht bei SSB/FM/Digital-Spots `–`. Ein `~` vor dem Wert
+  bedeutet "Schätzung", weil gerade kein Skimmer in der eigenen Region aktiv
+  ist und deshalb niemand die lokale Ausbreitung beurteilen kann.
+  Standardmäßig **aus** (die Funktion öffnet eine dauerhafte Verbindung nach
+  außen) – einschalten per Klick auf das `RBN`-Badge oben rechts oder in den
+  Settings.
 - **Weltkarte** – echte, zoom-/verschiebbare OpenStreetMap-Ansicht unterhalb
   der Spot-Liste (Größe per Ziehen an der Trennlinie anpassbar). Eigener
   Standort als grüner Marker (aus dem Locator in den Settings), sichtbare
-  Spots als rote Marker – nutzt dieselben QRZ-XML-Koordinaten wie die
-  KM-Spalte, braucht also dieselben QRZ-Zugangsdaten; ohne die bleibt nur
-  der eigene grüne Marker sichtbar (Hinweistext unter der Karte).
+  Spots als farbige Marker je Band – gesetzt auf die Koordinaten der
+  Park-Referenz, also ohne QRZ-Abo für alle sichtbar. Mehrere Aktivatoren im
+  selben Park teilen sich einen Marker.
 - **Sonnendaten (SFI/K/A/MUF)** – Badge oben rechts, alle 15 Minuten
   aktualisiert, kein Setup nötig.
 - **CAT-Log** – Debug-Fenster mit den rohen CAT-Befehlen/-Antworten (nur
