@@ -1477,9 +1477,25 @@ RBN_REGION_RADIUS_KM = 1200.0
 # circle_points_km) - plenty smooth at any zoom level actually usable on a
 # desktop map, without generating an excessive canvas polygon.
 RBN_HEAR_CIRCLE_SEGMENTS = 72
-# Within that region, reports are still distance-weighted: a skimmer
-# RBN_WEIGHT_HALF_KM away counts half as much as one at my own QTH.
+
+# Within the region, reports are combined *relative to each other* with
+# this half-distance (a skimmer RBN_WEIGHT_HALF_KM away counts half as much
+# as one at my own QTH when averaging several simultaneous SNR readings).
+# On its own this says nothing about *absolute* confidence: with only one
+# report, the relative weight cancels out of the average entirely, so a
+# lone skimmer 1100 km away would otherwise score almost as well as one
+# 50 km away just because both are technically "inside the region".
 RBN_WEIGHT_HALF_KM = 400.0
+# Separate, more forgiving half-distance for that absolute confidence: how
+# much a report's plausibility should be discounted for being far from my
+# own QTH, independent of how many other reports exist. Larger than
+# RBN_WEIGHT_HALF_KM on purpose - genuinely regional distances (the low
+# hundreds of km, same general propagation zone) should stay close to full
+# confidence, while reports out near RBN_REGION_RADIUS_KM (still "regional"
+# by definition, but hundreds of km closer to the edge of the propagation
+# zone than to me) get meaningfully discounted instead of counted at
+# near-full weight.
+RBN_CONFIDENCE_HALF_KM = 900.0
 
 RBN_LINE_RE = re.compile(
     # The skimmer's node suffix ("-#", "-1") is kept by the pattern and
@@ -1873,7 +1889,10 @@ def chance_to_hear(
 
     Three cases, in descending order of confidence:
       1. Skimmers inside RBN_REGION_RADIUS_KM hear it -> distance-weighted
-         SNR of exactly those, the strongest evidence available.
+         SNR of exactly those, the strongest evidence available - but still
+         scaled down the closer that evidence sits to the edge of the
+         region rather than to me (see the proximity_factor comment below;
+         "inside the region" alone is not the same as "nearby").
       2. Only distant skimmers hear it, but skimmers near the user *are*
          active -> they'd have heard it if the path were open, so this is
          genuine evidence against, scored low.
@@ -1897,7 +1916,18 @@ def chance_to_hear(
         # More independent skimmers agreeing makes the figure more solid; a
         # lone report is deliberately held back a little.
         count_factor = min(1.0, 0.75 + 0.25 * (len(regional) - 1) / 3.0)
-        score = rbn_snr_score(weighted_snr) * count_factor
+        # Absolute confidence in the evidence itself, separate from
+        # weighted_snr's *relative* combination above: with a single
+        # report, RBN_WEIGHT_HALF_KM's weight cancels out of that average
+        # entirely (weighted average of one number is just that number),
+        # so without this a lone skimmer right at the edge of
+        # RBN_REGION_RADIUS_KM would score almost as well as one next door
+        # just for being nominally "inside the region". Mean of the
+        # per-report weights (on the more forgiving RBN_CONFIDENCE_HALF_KM
+        # curve), so a cluster of closer corroborating reports keeps this
+        # near 1.0 even if one of them happens to be farther out.
+        proximity_factor = sum(1.0 / (1.0 + (km / RBN_CONFIDENCE_HALF_KM) ** 2) for _, km in regional) / len(regional)
+        score = rbn_snr_score(weighted_snr) * count_factor * proximity_factor
         estimate = False
         pool = regional
     else:

@@ -66,9 +66,14 @@ QRZ-Upload – alles in einer Oberfläche.
   verteilte Skimmer-Empfänger, die laufend melden, welches Rufzeichen sie
   mit welchem Signal-Rausch-Abstand hören. Die App verbindet sich mit dem
   RBN-Telnet-Feed und wertet aus, was die Skimmer **in der eigenen Umgebung**
-  (bis 1200 km, nach Entfernung gewichtet) über genau diesen Aktivator auf
-  genau diesem Band melden – also eine gemessene Momentaufnahme der
-  Ausbreitung auf der eigenen Funkstrecke statt einer allgemeinen Vorhersage.
+  (bis 1200 km) über genau diesen Aktivator auf genau diesem Band melden –
+  also eine gemessene Momentaufnahme der Ausbreitung auf der eigenen
+  Funkstrecke statt einer allgemeinen Vorhersage. Je näher ein meldender
+  Skimmer an der eigenen Position liegt, desto stärker zählt seine Meldung
+  – sowohl untereinander (mehrere Skimmer werden gewichtet gemittelt) als
+  auch absolut: ein einzelner Skimmer, der zwar noch innerhalb der 1200 km
+  liegt, aber z. B. 950 km entfernt ist, zieht die Prozentzahl spürbar nach
+  unten, statt fast so stark zu zählen wie einer direkt nebenan.
   Kostenlos und ohne Anmeldung; gebraucht werden nur das eigene Rufzeichen
   (dient als Login) und der eigene Locator. Da die Skimmer nur CW und RTTY
   dekodieren, steht bei SSB/FM/Digital-Spots `–`. Ein `~` vor dem Wert
