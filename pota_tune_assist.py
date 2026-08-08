@@ -16,7 +16,12 @@ Two interchangeable rig backends, selected in Settings:
 
 Both features below work with either backend:
   - POTA spot list (polled from api.pota.app): double-click a spot to
-    QSY the radio to its frequency and mode.
+    QSY the radio to its frequency and mode. Spots are placed on the map
+    and distance-ranked by their *park reference's* coordinates, which
+    POTA publishes for every park - that's where the activator actually
+    is, and it needs no third-party subscription. Optionally each spot
+    also gets a "Chance to Hear" estimate from live Reverse Beacon
+    Network skimmer reports (see the RBN section below).
   - Tune button (press and hold): moves TUNE_OFFSET_HZ off the current
     frequency, switches to CW at the configured tune power and keys a
     steady carrier; releasing un-keys and restores frequency, mode and
@@ -41,6 +46,7 @@ power is a level, not watts.
 
 from __future__ import annotations
 
+import functools
 import io
 import json
 import math
@@ -71,9 +77,20 @@ import serial.tools.list_ports
 
 POTA_SPOTS_URL = "https://api.pota.app/spot/activator"
 POTA_SPOT_POST_URL = "https://api.pota.app/spot/"
+# Per-park detail endpoint - only used as a fallback for spots whose own
+# JSON carries no coordinates (see fetch_park_info); a park reference is a
+# fixed location, so results are cached in the DB for PARK_CACHE_TTL_DAYS.
+POTA_PARK_URL = "https://api.pota.app/park/{}"
 POTA_POLL_SECONDS_DEFAULT = 60
 WORKED_TODAY_REFRESH_SECONDS = 60
 QRZ_LOGBOOK_API_URL = "https://logbook.qrz.com/api"
+
+# Park coordinates change ~never, so a long TTL is fine; a *failed* lookup
+# is retried much sooner so one network hiccup doesn't blank a park's pin
+# for half a year.
+PARK_CACHE_TTL_DAYS = 180
+PARK_CACHE_MISS_TTL_HOURS = 6
+PARK_WORKER_COUNT = 4
 
 # Default respot comment template, filled in via render_respot_comment().
 # Placeholders: {call} {mycall} {rst_sent} {rst_rcvd} {freq} {mode} {ref}
@@ -127,6 +144,10 @@ def _db_connect() -> sqlite3.Connection:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS qrz_cache ("
         "call TEXT PRIMARY KEY, lat REAL, lon REAL, op_name TEXT, fetched_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS park_cache ("
+        "reference TEXT PRIMARY KEY, lat REAL, lon REAL, fetched_at TEXT NOT NULL)"
     )
     return conn
 
@@ -226,6 +247,48 @@ def save_qrz_cache_entry(call: str, info: "QrzCallsignInfo | None") -> None:
         conn.execute(
             "INSERT OR REPLACE INTO qrz_cache (call, lat, lon, op_name, fetched_at) VALUES (?, ?, ?, ?, ?)",
             (call, lat, lon, op_name, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_park_cache() -> dict[str, tuple[float, float] | None]:
+    """Park reference -> coordinates (or None for a park POTA has no
+    position for), persisted across runs. Parks don't move, so hits stay
+    valid for PARK_CACHE_TTL_DAYS; misses expire after
+    PARK_CACHE_MISS_TTL_HOURS so they get retried reasonably soon."""
+    try:
+        conn = _db_connect()
+    except sqlite3.Error:
+        return {}
+    try:
+        now = datetime.now(timezone.utc)
+        hit_cutoff = (now - timedelta(days=PARK_CACHE_TTL_DAYS)).isoformat()
+        miss_cutoff = (now - timedelta(hours=PARK_CACHE_MISS_TTL_HOURS)).isoformat()
+        cache: dict[str, tuple[float, float] | None] = {}
+        rows = conn.execute(
+            "SELECT reference, lat, lon FROM park_cache "
+            "WHERE (lat IS NOT NULL AND fetched_at >= ?) OR (lat IS NULL AND fetched_at >= ?)",
+            (hit_cutoff, miss_cutoff),
+        )
+        for reference, lat, lon in rows:
+            cache[reference] = (lat, lon) if lat is not None and lon is not None else None
+        return cache
+    finally:
+        conn.close()
+
+
+def save_park_cache_entry(reference: str, latlon: tuple[float, float] | None) -> None:
+    lat, lon = latlon if latlon is not None else (None, None)
+    try:
+        conn = _db_connect()
+    except sqlite3.Error:
+        return
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO park_cache (reference, lat, lon, fetched_at) VALUES (?, ?, ?, ?)",
+            (reference, lat, lon, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
     finally:
@@ -1101,10 +1164,46 @@ class Spot:
     comments: str
     location_desc: str
     invalid: bool
+    # Park position, straight out of the spot feed when it carries one
+    # (see park_latlon_from_payload). None means "not in this payload" -
+    # the reference is then resolved via the park endpoint instead, so a
+    # missing value here is a cache miss, not "no location exists".
+    park_latlon: tuple[float, float] | None = None
 
     @property
     def freq_hz(self) -> int:
         return int(round(self.frequency_khz * 1000))
+
+
+def _coerce_float(value) -> float | None:
+    """POTA's JSON hands back coordinates as numbers on some endpoints and
+    as strings on others (and null/"" when a park has none)."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if math.isfinite(result) else None
+
+
+def park_latlon_from_payload(item: dict) -> tuple[float, float] | None:
+    """Park coordinates from a POTA spot or park JSON object. Prefers the
+    explicit lat/lon pair and falls back to the Maidenhead grid the same
+    payloads carry, which is accurate to a few km - plenty for a map pin
+    and a distance column."""
+    lat = _coerce_float(item.get("latitude"))
+    lon = _coerce_float(item.get("longitude"))
+    # (0, 0) is in the Atlantic off Africa - as a park location it's always
+    # an unset field serialized as zero, not a real position.
+    if lat is not None and lon is not None and -90 <= lat <= 90 and -180 <= lon <= 180:
+        if not (lat == 0.0 and lon == 0.0):
+            return lat, lon
+    for key in ("grid6", "grid4", "grid"):
+        latlon = grid_to_latlon(item.get(key) or "")
+        if latlon is not None:
+            return latlon
+    return None
 
 
 def fetch_pota_spots() -> list[Spot]:
@@ -1130,9 +1229,27 @@ def fetch_pota_spots() -> list[Spot]:
             comments=item.get("comments", ""),
             location_desc=item.get("locationDesc", ""),
             invalid=bool(item.get("invalid")),
+            park_latlon=park_latlon_from_payload(item),
         ))
     spots.sort(key=lambda s: s.frequency_khz)
     return spots
+
+
+def fetch_park_info(reference: str) -> tuple[float, float] | None:
+    """Coordinates for a single park reference. Raises on network errors so
+    the caller can tell "POTA is unreachable right now" (retry soon) apart
+    from "this park genuinely has no coordinates" (cache the miss)."""
+    resp = requests.get(POTA_PARK_URL.format(urllib.parse.quote(reference)), timeout=10)
+    if resp.status_code == 404:
+        return None
+    resp.raise_for_status()
+    try:
+        data = resp.json()
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return park_latlon_from_payload(data)
 
 
 def fetch_solar_data() -> dict[str, str] | None:
@@ -1249,6 +1366,32 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return r * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
+def destination_point_km(lat: float, lon: float, bearing_deg: float, distance_km: float) -> tuple[float, float]:
+    """Point reached from (lat, lon) after travelling distance_km along a
+    great circle on bearing_deg (0 = north, clockwise) - the standard
+    spherical "direct" geodesic problem, inverse of haversine_km. Used to
+    build the "how far is this activator being heard" ring (see
+    circle_points_km) point by point."""
+    r = 6371.0
+    lat1, lon1, brng = math.radians(lat), math.radians(lon), math.radians(bearing_deg)
+    d_r = distance_km / r
+    lat2 = math.asin(math.sin(lat1) * math.cos(d_r) + math.cos(lat1) * math.sin(d_r) * math.cos(brng))
+    lon2 = lon1 + math.atan2(
+        math.sin(brng) * math.sin(d_r) * math.cos(lat1),
+        math.cos(d_r) - math.sin(lat1) * math.sin(lat2),
+    )
+    return math.degrees(lat2), (math.degrees(lon2) + 540) % 360 - 180  # normalize to [-180, 180]
+
+
+def circle_points_km(lat: float, lon: float, radius_km: float, segments: int = 72) -> list[tuple[float, float]]:
+    """Points approximating a geodesic circle of radius_km around (lat, lon)
+    - a real circle-on-the-sphere, not a lat/lon ellipse, so it stays round
+    close to the poles too (irrelevant for ham bands, but free to get
+    right). The map widget's polygon closes itself, so no need to repeat
+    the first point at the end."""
+    return [destination_point_km(lat, lon, bearing, radius_km) for bearing in range(0, 360, 360 // segments)]
+
+
 QRZ_XML_URL = "https://xmldata.qrz.com/xml/current/"
 LOCATOR_WORKER_COUNT = 12
 QRZ_CACHE_TTL_DAYS = 30
@@ -1285,6 +1428,699 @@ BAND_MAP_COLORS = {
     "6m": "#ECF0F1",
 }
 BAND_MAP_COLOR_DEFAULT = "#95A5A6"
+
+# ---------------------------------------------------------------------------
+# Reverse Beacon Network - "Chance to Hear"
+#
+# The RBN is a worldwide network of CW/RTTY skimmers: unattended receivers
+# that continuously decode every callsign they hear and report it with a
+# signal-to-noise figure. That makes it a live, measured propagation probe -
+# if skimmers *near me* are hearing an activator strongly right now, so
+# probably can I; if skimmers near me hear nothing while distant ones do,
+# the path to my own QTH is the part that's closed.
+#
+# Feed is the classic DX-cluster-style telnet stream (no API/key, login is
+# just a callsign), one line per report:
+#   DX de EA5WU-#:    7018.3  RW1M           CW    19 dB  18 WPM  CQ  2259Z
+# ---------------------------------------------------------------------------
+
+RBN_HOST = "telnet.reversebeacon.net"
+RBN_PORT = 7000  # CW/RTTY skimmers; port 7001 is the separate FT8-only feed
+RBN_LOGIN_TIMEOUT = 20.0
+# The feed is continuous, so a long silence means the connection died in a
+# way that never surfaced as a socket error (very common on this service).
+RBN_SOCKET_TIMEOUT = 120.0
+RBN_RECONNECT_INITIAL_SECONDS = 5.0
+RBN_RECONNECT_MAX_SECONDS = 300.0
+
+# A skimmer report only says something about propagation *right now* - past
+# this age it's dropped entirely rather than shown as current.
+RBN_REPORT_TTL_SECONDS = 15 * 60
+# Bound on the firehose: the RBN reports the whole world, of which only the
+# handful of currently POTA-spotted calls interest us. Least-recently-heard
+# calls are evicted once this many are tracked.
+RBN_MAX_TRACKED_CALLS = 4000
+
+# The store fills continuously in the background, but redrawing the whole
+# spot table is disruptive (it resets scroll position), so chance values are
+# only refreshed on this interval on top of the normal spot poll.
+RBN_RENDER_REFRESH_SECONDS = 45.0
+RBN_BADGE_REFRESH_SECONDS = 2.0
+RBN_PRUNE_INTERVAL_SECONDS = 60.0
+
+# Skimmers this close count as "my region" - i.e. what they hear is a fair
+# proxy for what my own station can hear.
+RBN_REGION_RADIUS_KM = 1200.0
+
+# Map "how far is this activator being heard" ring, drawn around the park
+# on QSY: number of points approximating the geodesic circle (see
+# circle_points_km) - plenty smooth at any zoom level actually usable on a
+# desktop map, without generating an excessive canvas polygon.
+RBN_HEAR_CIRCLE_SEGMENTS = 72
+
+# Within the region, reports are combined *relative to each other* with
+# this half-distance (a skimmer RBN_WEIGHT_HALF_KM away counts half as much
+# as one at my own QTH when averaging several simultaneous SNR readings).
+# On its own this says nothing about *absolute* confidence: with only one
+# report, the relative weight cancels out of the average entirely, so a
+# lone skimmer 1100 km away would otherwise score almost as well as one
+# 50 km away just because both are technically "inside the region".
+RBN_WEIGHT_HALF_KM = 400.0
+# Separate, more forgiving half-distance for that absolute confidence: how
+# much a report's plausibility should be discounted for being far from my
+# own QTH, independent of how many other reports exist. Larger than
+# RBN_WEIGHT_HALF_KM on purpose - genuinely regional distances (the low
+# hundreds of km, same general propagation zone) should stay close to full
+# confidence, while reports out near RBN_REGION_RADIUS_KM (still "regional"
+# by definition, but hundreds of km closer to the edge of the propagation
+# zone than to me) get meaningfully discounted instead of counted at
+# near-full weight.
+RBN_CONFIDENCE_HALF_KM = 900.0
+
+RBN_LINE_RE = re.compile(
+    # The skimmer's node suffix ("-#", "-1") is kept by the pattern and
+    # stripped in normalize_skimmer_call(), so there's exactly one place
+    # that knows about it.
+    r"^DX\s+de\s+(?P<skimmer>[A-Z0-9/#-]+):\s+"
+    r"(?P<khz>\d+(?:\.\d+)?)\s+"
+    r"(?P<dx>[A-Z0-9/]+)\s+"
+    r"(?P<mode>[A-Z0-9]+)\s+"
+    r"(?P<snr>-?\d+)\s*dB",
+    re.IGNORECASE,
+)
+
+# Approximate center of each DXCC entity that hosts skimmers, used to place
+# a reporting skimmer on the map well enough to tell "near me" from "far
+# away". Country-level accuracy is entirely sufficient at the ~400-1200 km
+# scale the weighting works on, and unlike a QRZ lookup it costs nothing and
+# needs no subscription. Matched longest-prefix-first, so the more specific
+# entries below (EA8, VE7, ...) win over their parent prefix.
+SKIMMER_PREFIX_LATLON: dict[str, tuple[float, float]] = {
+    # -- Europe ----------------------------------------------------------
+    "D": (51.0, 10.0),        # Germany (DA-DR); DU/DS/D2/D4/D6 overridden below
+    "G": (52.5, -1.5), "M": (52.5, -1.5), "2E": (52.5, -1.5),
+    "GM": (56.5, -4.0), "MM": (56.5, -4.0), "2M": (56.5, -4.0),
+    "GW": (52.3, -3.6), "MW": (52.3, -3.6), "2W": (52.3, -3.6),
+    "GI": (54.6, -6.5), "MI": (54.6, -6.5), "2I": (54.6, -6.5),
+    "GD": (54.2, -4.5), "GJ": (49.2, -2.1), "GU": (49.5, -2.5),
+    "EI": (53.3, -8.0), "EJ": (53.3, -8.0),
+    "F": (46.5, 2.5), "TM": (46.5, 2.5), "TK": (42.1, 9.1),
+    "ON": (50.6, 4.6), "OO": (50.6, 4.6), "OT": (50.6, 4.6),
+    "PA": (52.2, 5.5), "PB": (52.2, 5.5), "PC": (52.2, 5.5), "PD": (52.2, 5.5),
+    "PE": (52.2, 5.5), "PF": (52.2, 5.5), "PG": (52.2, 5.5), "PH": (52.2, 5.5),
+    "PI": (52.2, 5.5),
+    "LX": (49.8, 6.1), "OE": (47.6, 14.1),
+    "HB": (46.8, 8.2), "HB0": (47.2, 9.5),
+    "I": (42.8, 12.5), "IK": (42.8, 12.5), "IZ": (42.8, 12.5), "IW": (42.8, 12.5),
+    "IU": (42.8, 12.5), "IS": (40.1, 9.1), "IT": (37.6, 14.0), "IQ": (42.8, 12.5),
+    "EA": (40.3, -3.7), "EB": (40.3, -3.7), "EC": (40.3, -3.7), "ED": (40.3, -3.7),
+    "EE": (40.3, -3.7), "EF": (40.3, -3.7), "EG": (40.3, -3.7), "EH": (40.3, -3.7),
+    "EA6": (39.6, 2.9), "EA8": (28.3, -16.6), "EA9": (35.3, -3.0),
+    "CT": (39.6, -8.0), "CR": (39.6, -8.0), "CQ": (39.6, -8.0),
+    "CT3": (32.7, -16.9), "CR3": (32.7, -16.9), "CU": (38.5, -28.2),
+    "SP": (52.0, 19.5), "SN": (52.0, 19.5), "SO": (52.0, 19.5),
+    "SQ": (52.0, 19.5), "SR": (52.0, 19.5), "3Z": (52.0, 19.5), "HF": (52.0, 19.5),
+    "OK": (49.8, 15.5), "OL": (49.8, 15.5), "OM": (48.7, 19.5),
+    "HA": (47.2, 19.4), "HG": (47.2, 19.4),
+    "YO": (45.9, 25.0), "YP": (45.9, 25.0), "YQ": (45.9, 25.0), "YR": (45.9, 25.0),
+    "LZ": (42.7, 25.5), "S5": (46.1, 14.8), "9A": (45.1, 16.4),
+    "YU": (44.2, 20.9), "YT": (44.2, 20.9), "YZ": (44.2, 20.9),
+    "E7": (44.0, 17.8), "Z3": (41.6, 21.7), "4O": (42.7, 19.4), "ZA": (41.2, 20.1),
+    "SV": (39.0, 22.0), "SW": (39.0, 22.0), "SX": (39.0, 22.0), "SZ": (39.0, 22.0),
+    "SV5": (36.2, 28.0), "SV9": (35.2, 24.9),
+    "5B": (35.1, 33.4), "C4": (35.1, 33.4), "H2": (35.1, 33.4),
+    "TA": (39.0, 35.0), "TC": (39.0, 35.0),
+    "OH": (62.5, 26.0), "OF": (62.5, 26.0), "OG": (62.5, 26.0), "OI": (62.5, 26.0),
+    "OH0": (60.2, 20.0), "OJ0": (59.8, 19.5),
+    "SM": (60.0, 15.5), "SA": (60.0, 15.5), "SB": (60.0, 15.5), "SC": (60.0, 15.5),
+    "SD": (60.0, 15.5), "SE": (60.0, 15.5), "SF": (60.0, 15.5), "SG": (60.0, 15.5),
+    "SH": (60.0, 15.5), "SI": (60.0, 15.5), "SJ": (60.0, 15.5), "SK": (60.0, 15.5),
+    "SL": (60.0, 15.5), "7S": (60.0, 15.5), "8S": (60.0, 15.5),
+    "LA": (61.0, 9.0), "LB": (61.0, 9.0), "LC": (61.0, 9.0), "LN": (61.0, 9.0),
+    "JW": (78.2, 15.6), "JX": (71.0, -8.3),
+    "OZ": (56.0, 10.0), "OU": (56.0, 10.0), "OV": (56.0, 10.0), "5Q": (56.0, 10.0),
+    "OW": (56.0, 10.0), "OY": (62.0, -6.8), "OX": (72.0, -40.0),
+    "TF": (64.9, -19.0),
+    "ES": (58.7, 25.5), "YL": (56.9, 24.6), "LY": (55.3, 23.9),
+    "EU": (53.7, 27.9), "EV": (53.7, 27.9), "EW": (53.7, 27.9),
+    "UR": (49.0, 32.0), "US": (49.0, 32.0), "UT": (49.0, 32.0), "UU": (49.0, 32.0),
+    "UV": (49.0, 32.0), "UW": (49.0, 32.0), "UX": (49.0, 32.0), "UY": (49.0, 32.0),
+    "UZ": (49.0, 32.0), "EM": (49.0, 32.0), "EN": (49.0, 32.0), "EO": (49.0, 32.0),
+    # Russia: European by default, Asiatic call areas 8/9/0 pulled east.
+    "R": (55.7, 37.6), "U": (55.7, 37.6),
+    "R8": (56.0, 68.0), "R9": (56.0, 68.0), "R0": (60.0, 100.0),
+    "U8": (56.0, 68.0), "U9": (56.0, 68.0), "U0": (60.0, 100.0),
+    "UA8": (56.0, 68.0), "UA9": (56.0, 68.0), "UA0": (60.0, 100.0),
+    "RA9": (56.0, 68.0), "RA0": (60.0, 100.0),
+    "RN9": (56.0, 68.0), "RN0": (60.0, 100.0),
+    "RK9": (56.0, 68.0), "RK0": (60.0, 100.0),
+    "RZ9": (56.0, 68.0), "RZ0": (60.0, 100.0),
+    "RW9": (56.0, 68.0), "RW0": (60.0, 100.0),
+    "RV9": (56.0, 68.0), "RV0": (60.0, 100.0),
+    "RU9": (56.0, 68.0), "RU0": (60.0, 100.0),
+    "RX9": (56.0, 68.0), "RX0": (60.0, 100.0),
+    "R2F": (54.7, 20.5), "UA2": (54.7, 20.5), "RA2": (54.7, 20.5),
+    "3A": (43.7, 7.4), "9H": (35.9, 14.4), "ZB": (36.1, -5.3),
+    "T7": (43.9, 12.4), "HV": (41.9, 12.5), "1A": (41.9, 12.5),
+    "OJ": (59.8, 19.5), "TR": (-0.8, 11.6),
+    # -- Africa / Middle East ---------------------------------------------
+    "CN": (32.0, -6.0), "SU": (26.8, 30.8), "7X": (28.0, 2.6), "3V": (34.0, 9.6),
+    "5A": (27.0, 17.0), "ZS": (-29.0, 24.0), "V5": (-22.0, 17.0),
+    "5Z": (-1.3, 36.8), "5H": (-6.4, 35.0), "9J": (-13.1, 27.9),
+    "Z2": (-19.0, 29.9), "7Q": (-13.3, 34.3), "C9": (-18.7, 35.5),
+    "3B8": (-20.3, 57.5), "3B9": (-19.7, 63.4), "FR": (-21.1, 55.5),
+    "D2": (-11.2, 17.9), "D4": (16.0, -24.0), "D6": (-11.9, 43.3),
+    "TU": (7.5, -5.5), "5N": (9.1, 8.7), "9G": (7.9, -1.0),
+    "4X": (31.5, 34.9), "4Z": (31.5, 34.9), "OD": (33.9, 35.5), "JY": (31.9, 35.9),
+    "A4": (21.5, 57.0), "A6": (24.3, 54.0), "A7": (25.3, 51.2), "A9": (26.0, 50.5),
+    "HZ": (24.0, 45.0), "7Z": (24.0, 45.0), "9K": (29.3, 47.5), "YI": (33.3, 44.4),
+    "EP": (32.5, 53.7), "EK": (40.2, 44.5), "4J": (40.4, 49.9), "4K": (40.4, 49.9),
+    "4L": (42.0, 43.5), "EX": (41.2, 74.8), "EY": (38.9, 71.3), "EZ": (38.9, 59.6),
+    "UN": (48.0, 68.0), "UO": (48.0, 68.0), "UP": (48.0, 68.0), "UQ": (48.0, 68.0),
+    # -- Asia / Oceania ---------------------------------------------------
+    "JA": (36.0, 138.0), "JE": (36.0, 138.0), "JF": (36.0, 138.0), "JG": (36.0, 138.0),
+    "JH": (36.0, 138.0), "JI": (36.0, 138.0), "JJ": (36.0, 138.0), "JK": (36.0, 138.0),
+    "JL": (36.0, 138.0), "JM": (36.0, 138.0), "JN": (36.0, 138.0), "JO": (36.0, 138.0),
+    "JP": (36.0, 138.0), "JQ": (36.0, 138.0), "JR": (36.0, 138.0), "JS": (36.0, 138.0),
+    "7J": (36.0, 138.0), "7K": (36.0, 138.0), "7L": (36.0, 138.0), "7M": (36.0, 138.0),
+    "7N": (36.0, 138.0), "8J": (36.0, 138.0), "8N": (36.0, 138.0),
+    "HL": (36.5, 127.9), "DS": (36.5, 127.9), "DT": (36.5, 127.9), "6K": (36.5, 127.9),
+    "6L": (36.5, 127.9), "6M": (36.5, 127.9), "6N": (36.5, 127.9),
+    "BY": (35.0, 105.0), "BA": (35.0, 105.0), "BD": (35.0, 105.0), "BG": (35.0, 105.0),
+    "BH": (35.0, 105.0), "BI": (35.0, 105.0), "BT": (35.0, 105.0),
+    "BV": (23.7, 121.0), "VR": (22.3, 114.2), "XX": (22.2, 113.5),
+    "VU": (21.0, 78.0), "AT": (21.0, 78.0), "4S": (7.9, 80.8), "8Q": (3.2, 73.2),
+    "S2": (23.7, 90.4), "9N": (28.4, 84.1), "AP": (30.4, 69.3),
+    "HS": (15.0, 101.0), "E2": (15.0, 101.0), "XW": (18.0, 103.0),
+    "XU": (12.6, 104.9), "XV": (16.0, 106.0), "3W": (16.0, 106.0),
+    "9M": (4.2, 102.0), "9V": (1.35, 103.8), "V8": (4.5, 114.7),
+    "YB": (-2.5, 118.0), "YC": (-2.5, 118.0), "YD": (-2.5, 118.0), "YE": (-2.5, 118.0),
+    "YF": (-2.5, 118.0), "YG": (-2.5, 118.0), "YH": (-2.5, 118.0),
+    "DU": (12.9, 121.8), "DV": (12.9, 121.8), "DW": (12.9, 121.8),
+    "DX": (12.9, 121.8), "DY": (12.9, 121.8), "DZ": (12.9, 121.8),
+    "VK": (-25.0, 134.0), "AX": (-25.0, 134.0), "VI": (-25.0, 134.0),
+    "VK9": (-29.0, 168.0), "VK0": (-53.1, 73.5),
+    "ZL": (-41.0, 174.0), "ZM": (-41.0, 174.0), "ZK": (-41.0, 174.0),
+    "FK": (-21.3, 165.5), "FO": (-17.6, -149.4), "3D2": (-17.8, 178.0),
+    "KH2": (13.4, 144.8), "KH0": (15.2, 145.7), "KH8": (-14.3, -170.7),
+    # -- North America -----------------------------------------------------
+    # US mainland is resolved from the call-area digit (see skimmer_latlon);
+    # only the offshore entities need explicit prefixes here.
+    "KH6": (20.8, -156.3), "WH6": (20.8, -156.3), "NH6": (20.8, -156.3), "AH6": (20.8, -156.3),
+    "KH7": (20.8, -156.3), "WH7": (20.8, -156.3), "NH7": (20.8, -156.3), "AH7": (20.8, -156.3),
+    "KL": (64.2, -149.5), "WL": (64.2, -149.5), "NL": (64.2, -149.5), "AL": (64.2, -149.5),
+    "KP4": (18.2, -66.5), "WP4": (18.2, -66.5), "NP4": (18.2, -66.5), "KP3": (18.2, -66.5),
+    "KP2": (17.7, -64.8), "WP2": (17.7, -64.8), "NP2": (17.7, -64.8),
+    "VE": (56.0, -96.0), "VA": (56.0, -96.0), "VO": (48.9, -57.0), "VY": (63.0, -95.0),
+    "VE1": (44.7, -63.6), "VA1": (44.7, -63.6), "VE9": (46.5, -66.5),
+    "VE2": (46.8, -71.2), "VA2": (46.8, -71.2),
+    "VE3": (44.0, -79.0), "VA3": (44.0, -79.0),
+    "VE4": (50.0, -97.1), "VA4": (50.0, -97.1),
+    "VE5": (52.1, -106.6), "VA5": (52.1, -106.6),
+    "VE6": (53.5, -113.5), "VA6": (53.5, -113.5),
+    "VE7": (49.3, -123.1), "VA7": (49.3, -123.1),
+    "XE": (23.6, -102.5), "XF": (23.6, -102.5), "4A": (23.6, -102.5), "6D": (23.6, -102.5),
+    "CO": (21.5, -79.5), "CM": (21.5, -79.5), "HI": (18.7, -70.2), "HH": (18.9, -72.3),
+    "6Y": (18.1, -77.3), "8P": (13.2, -59.5), "9Y": (10.5, -61.3), "ZF": (19.3, -81.3),
+    "V3": (17.2, -88.8), "TG": (15.5, -90.2), "YS": (13.8, -88.9), "HR": (14.8, -86.2),
+    "YN": (12.9, -85.2), "TI": (9.9, -84.1), "HP": (8.5, -80.0), "V4": (17.3, -62.7),
+    "FM": (14.6, -61.0), "FG": (16.2, -61.6), "FS": (18.1, -63.1), "PJ": (12.2, -68.9),
+    "J3": (12.1, -61.7), "J6": (13.9, -61.0), "J7": (15.4, -61.4), "J8": (13.2, -61.2),
+    "V2": (17.1, -61.8), "VP2": (18.0, -63.1), "VP5": (21.7, -71.8), "VP9": (32.3, -64.8),
+    "C6": (24.7, -78.0), "ZP": (-23.4, -58.4),
+    # -- South America -----------------------------------------------------
+    "PY": (-15.8, -47.9), "PP": (-15.8, -47.9), "PQ": (-15.8, -47.9), "PR": (-15.8, -47.9),
+    "PS": (-15.8, -47.9), "PT": (-15.8, -47.9), "PU": (-15.8, -47.9), "PV": (-15.8, -47.9),
+    "PW": (-15.8, -47.9), "ZV": (-15.8, -47.9), "ZW": (-15.8, -47.9), "ZX": (-15.8, -47.9),
+    "ZY": (-15.8, -47.9), "ZZ": (-15.8, -47.9),
+    "LU": (-34.6, -58.4), "LO": (-34.6, -58.4), "LP": (-34.6, -58.4), "LQ": (-34.6, -58.4),
+    "LR": (-34.6, -58.4), "LS": (-34.6, -58.4), "LT": (-34.6, -58.4), "LV": (-34.6, -58.4),
+    "LW": (-34.6, -58.4), "AY": (-34.6, -58.4), "AZ": (-34.6, -58.4), "L2": (-34.6, -58.4),
+    "CE": (-33.5, -70.7), "CA": (-33.5, -70.7), "CB": (-33.5, -70.7), "CC": (-33.5, -70.7),
+    "CD": (-33.5, -70.7), "XQ": (-33.5, -70.7), "XR": (-33.5, -70.7), "3G": (-33.5, -70.7),
+    "CX": (-34.9, -56.2), "CV": (-34.9, -56.2), "CW": (-34.9, -56.2),
+    "CP": (-16.5, -68.1), "OA": (-12.0, -77.0), "OB": (-12.0, -77.0), "OC": (-12.0, -77.0),
+    "HC": (-0.2, -78.5), "HD": (-0.2, -78.5), "HK": (4.6, -74.1), "HJ": (4.6, -74.1),
+    "YV": (10.5, -66.9), "YW": (10.5, -66.9), "YX": (10.5, -66.9), "YY": (10.5, -66.9),
+    "8R": (6.8, -58.2), "PZ": (5.8, -55.2), "FY": (4.9, -52.3),
+}
+
+# Rough center of each mainland US call area, keyed by the digit in the
+# call - the only prefix system where the digit itself carries geography.
+US_CALL_AREA_LATLON: dict[str, tuple[float, float]] = {
+    "0": (41.5, -98.0),    # NE IA KS MO MN ND SD CO
+    "1": (43.0, -71.5),    # New England
+    "2": (40.9, -74.0),    # NY NJ
+    "3": (40.2, -76.5),    # PA DE MD DC
+    "4": (33.5, -82.0),    # Southeast
+    "5": (32.0, -97.0),    # TX OK LA AR MS NM
+    "6": (36.5, -119.5),   # CA
+    "7": (44.0, -114.0),   # Northwest / Mountain
+    "8": (40.5, -82.5),    # MI OH WV
+    "9": (41.0, -88.5),    # IL IN WI
+}
+
+# Longest first, so "EA8" wins over "EA" and "DU" over "D".
+_SKIMMER_PREFIXES_BY_LENGTH = sorted(SKIMMER_PREFIX_LATLON, key=len, reverse=True)
+
+
+def normalize_skimmer_call(call: str) -> str:
+    """Skimmer calls arrive with a node suffix ("DL0AAA-#", "OH6BG-1") that
+    identifies the feed, not the station - strip it for geolocation."""
+    call = (call or "").strip().upper()
+    if "-" in call:
+        call = call.split("-", 1)[0]
+    return call.strip("#")
+
+
+@functools.lru_cache(maxsize=8192)
+def skimmer_latlon(call: str) -> tuple[float, float] | None:
+    """Approximate position of an RBN skimmer from its callsign prefix.
+    Returns None for a prefix that isn't in the table, in which case the
+    skimmer is simply left out of the scoring rather than guessed at.
+
+    Cached because the scoring re-resolves the same few hundred skimmer
+    calls on every table render, and the lookup is a linear scan over the
+    prefix table."""
+    call = normalize_skimmer_call(call)
+    if "/" in call:
+        # A skimmer keyed as "DL/W1AW" is physically in the prefix country,
+        # so unlike base_callsign_for_lookup() the *prefix* is what matters
+        # here - but only when it really looks like a country prefix and not
+        # a "/P"-style suffix on a normal call.
+        head, tail = call.split("/", 1)
+        tail = tail.split("/", 1)[0]
+        if 1 <= len(head) <= 3 and not head.isdigit():
+            call = head
+        elif 1 <= len(tail) <= 3 and not tail.isdigit():
+            call = tail
+        else:
+            call = head
+    if not call:
+        return None
+    for prefix in _SKIMMER_PREFIXES_BY_LENGTH:
+        if call.startswith(prefix):
+            return SKIMMER_PREFIX_LATLON[prefix]
+    # Mainland US (K/N/W/A...): the offshore K/N/W/A entities are already
+    # covered by the explicit prefixes above, so anything reaching here is
+    # placed by its call-area digit.
+    if call[0] in "KNWA":
+        for ch in call:
+            if ch.isdigit():
+                return US_CALL_AREA_LATLON.get(ch)
+    return None
+
+
+@dataclass
+class RbnReport:
+    skimmer: str
+    dx_call: str
+    khz: float
+    band: str
+    snr_db: int
+    heard_at: float  # time.monotonic()
+
+
+def parse_rbn_line(line: str) -> RbnReport | None:
+    """One "DX de ..." feed line into an RbnReport, or None for anything
+    else on the stream (banners, prompts, keepalives, malformed lines)."""
+    match = RBN_LINE_RE.match(line.strip())
+    if match is None:
+        return None
+    try:
+        khz = float(match.group("khz"))
+        snr = int(match.group("snr"))
+    except ValueError:
+        return None
+    band = band_for_khz(khz)
+    if band == "?":
+        return None
+    dx_call = base_callsign_for_lookup(match.group("dx"))
+    if not dx_call:
+        return None
+    return RbnReport(
+        skimmer=normalize_skimmer_call(match.group("skimmer")),
+        dx_call=dx_call,
+        khz=khz,
+        band=band,
+        snr_db=snr,
+        heard_at=time.monotonic(),
+    )
+
+
+class RbnStore:
+    """Recent RBN reports, indexed by (callsign, band) and deduplicated per
+    skimmer so a station calling CQ for ten minutes counts once per skimmer
+    rather than fifty times. Written from the RBN reader thread, read from
+    the Tk main thread, hence the lock on every access."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._reports: dict[tuple[str, str], dict[str, RbnReport]] = {}
+        self._bucket_touched: dict[tuple[str, str], float] = {}
+        # Every skimmer heard from recently, whether or not it reported
+        # anything we care about - needed to tell "nobody near me hears this
+        # station" (real evidence of a closed path) apart from "no skimmer
+        # near me is on the air at all" (no evidence either way).
+        self._skimmers_seen: dict[str, float] = {}
+
+    def add(self, report: RbnReport) -> None:
+        key = (report.dx_call, report.band)
+        with self._lock:
+            self._reports.setdefault(key, {})[report.skimmer] = report
+            # Both timestamps track the *newest* report, never merely the
+            # last one written: prune() drops a whole bucket whose touch
+            # time has aged out, so letting an out-of-order (older) report
+            # move it backwards would discard the fresh reports next to it.
+            # -inf (not 0.0) as the "first time seen" default: time.monotonic()
+            # is only guaranteed monotonic, not positive, so 0.0 is not a
+            # safe stand-in for "older than anything real".
+            self._bucket_touched[key] = max(self._bucket_touched.get(key, float("-inf")), report.heard_at)
+            self._skimmers_seen[report.skimmer] = max(
+                self._skimmers_seen.get(report.skimmer, float("-inf")), report.heard_at
+            )
+
+    def reports_for(self, call: str, band: str) -> list[RbnReport]:
+        cutoff = time.monotonic() - RBN_REPORT_TTL_SECONDS
+        with self._lock:
+            bucket = self._reports.get((call, band))
+            if not bucket:
+                return []
+            return [r for r in bucket.values() if r.heard_at >= cutoff]
+
+    def active_skimmers(self) -> list[str]:
+        cutoff = time.monotonic() - RBN_REPORT_TTL_SECONDS
+        with self._lock:
+            return [s for s, seen in self._skimmers_seen.items() if seen >= cutoff]
+
+    def prune(self) -> None:
+        cutoff = time.monotonic() - RBN_REPORT_TTL_SECONDS
+        with self._lock:
+            for key in [k for k, touched in self._bucket_touched.items() if touched < cutoff]:
+                self._reports.pop(key, None)
+                self._bucket_touched.pop(key, None)
+            for skimmer in [s for s, seen in self._skimmers_seen.items() if seen < cutoff]:
+                del self._skimmers_seen[skimmer]
+            # Individual stale reports inside buckets that are otherwise
+            # still fresh (a skimmer that stopped hearing this station).
+            for key, bucket in list(self._reports.items()):
+                for skimmer in [s for s, r in bucket.items() if r.heard_at < cutoff]:
+                    del bucket[skimmer]
+                if not bucket:
+                    self._reports.pop(key, None)
+                    self._bucket_touched.pop(key, None)
+            excess = len(self._reports) - RBN_MAX_TRACKED_CALLS
+            if excess > 0:
+                oldest = sorted(self._bucket_touched.items(), key=lambda kv: kv[1])[:excess]
+                for key, _ in oldest:
+                    self._reports.pop(key, None)
+                    self._bucket_touched.pop(key, None)
+
+    def stats(self) -> tuple[int, int]:
+        """(tracked call/band buckets, individual reports)."""
+        with self._lock:
+            return len(self._reports), sum(len(b) for b in self._reports.values())
+
+
+def rbn_snr_score(snr_db: float) -> float:
+    """Skimmer SNR (dB) -> 0-100 "could I hear this myself" score.
+
+    Deliberately pessimistic relative to the raw number: a skimmer is a
+    quiet, well-sited receiver with a real antenna and a decoder that copies
+    signals a human ear can barely find, so its 5 dB is not a comfortable
+    QSO. The anchor points below treat ~10 dB as marginal-but-workable and
+    only call it a sure thing well above 25 dB."""
+    anchors = [(0.0, 5.0), (3.0, 12.0), (10.0, 45.0), (20.0, 78.0), (30.0, 94.0), (45.0, 99.0)]
+    if snr_db <= anchors[0][0]:
+        return anchors[0][1]
+    if snr_db >= anchors[-1][0]:
+        return anchors[-1][1]
+    for (x0, y0), (x1, y1) in zip(anchors, anchors[1:]):
+        if x0 <= snr_db <= x1:
+            return y0 + (y1 - y0) * (snr_db - x0) / (x1 - x0)
+    return anchors[-1][1]
+
+
+@dataclass
+class ChanceToHear:
+    score: int              # 0-100
+    quality: str            # "gut" / "ok" / "schwach"
+    estimate: bool          # True when no skimmer near the user could judge
+    skimmer_count: int      # reporting skimmers the score is based on
+    best_snr: int
+    nearest_km: float
+
+
+def chance_quality(score: int) -> str:
+    if score >= 70:
+        return "gut"
+    if score >= 40:
+        return "ok"
+    return "schwach"
+
+
+def chance_to_hear(
+    reports: list[RbnReport],
+    my_latlon: tuple[float, float],
+    regional_skimmers_active: int,
+) -> ChanceToHear | None:
+    """How likely the user is to hear a station, from what RBN skimmers
+    around them are reporting about it right now. None = no usable data.
+
+    Three cases, in descending order of confidence:
+      1. Skimmers inside RBN_REGION_RADIUS_KM hear it -> distance-weighted
+         SNR of exactly those, the strongest evidence available - but still
+         scaled down the closer that evidence sits to the edge of the
+         region rather than to me (see the proximity_factor comment below;
+         "inside the region" alone is not the same as "nearby").
+      2. Only distant skimmers hear it, but skimmers near the user *are*
+         active -> they'd have heard it if the path were open, so this is
+         genuine evidence against, scored low.
+      3. Only distant skimmers hear it and there's no active skimmer near
+         the user at all -> nothing can be concluded about the local path,
+         so the figure is flagged as an estimate (shown with a "~").
+    """
+    located: list[tuple[RbnReport, float]] = []
+    for report in reports:
+        latlon = skimmer_latlon(report.skimmer)
+        if latlon is None:
+            continue
+        located.append((report, haversine_km(my_latlon[0], my_latlon[1], latlon[0], latlon[1])))
+    if not located:
+        return None
+
+    regional = [(r, km) for r, km in located if km <= RBN_REGION_RADIUS_KM]
+    if regional:
+        weights = [1.0 / (1.0 + (km / RBN_WEIGHT_HALF_KM) ** 2) for _, km in regional]
+        weighted_snr = sum(w * r.snr_db for w, (r, _) in zip(weights, regional)) / sum(weights)
+        # More independent skimmers agreeing makes the figure more solid; a
+        # lone report is deliberately held back a little.
+        count_factor = min(1.0, 0.75 + 0.25 * (len(regional) - 1) / 3.0)
+        # Absolute confidence in the evidence itself, separate from
+        # weighted_snr's *relative* combination above: with a single
+        # report, RBN_WEIGHT_HALF_KM's weight cancels out of that average
+        # entirely (weighted average of one number is just that number),
+        # so without this a lone skimmer right at the edge of
+        # RBN_REGION_RADIUS_KM would score almost as well as one next door
+        # just for being nominally "inside the region". Mean of the
+        # per-report weights (on the more forgiving RBN_CONFIDENCE_HALF_KM
+        # curve), so a cluster of closer corroborating reports keeps this
+        # near 1.0 even if one of them happens to be farther out.
+        proximity_factor = sum(1.0 / (1.0 + (km / RBN_CONFIDENCE_HALF_KM) ** 2) for _, km in regional) / len(regional)
+        score = rbn_snr_score(weighted_snr) * count_factor * proximity_factor
+        estimate = False
+        pool = regional
+    else:
+        best_snr_all = max(r.snr_db for r, _ in located)
+        if regional_skimmers_active > 0:
+            score = min(30.0, rbn_snr_score(best_snr_all) * 0.30)
+            estimate = False
+        else:
+            score = rbn_snr_score(best_snr_all) * 0.60
+            estimate = True
+        pool = located
+
+    score_int = max(1, min(99, int(round(score))))
+    return ChanceToHear(
+        score=score_int,
+        quality=chance_quality(score_int),
+        estimate=estimate,
+        skimmer_count=len(pool),
+        best_snr=max(r.snr_db for r, _ in pool),
+        nearest_km=min(km for _, km in pool),
+    )
+
+
+class RbnClient:
+    """Background reader for the RBN telnet feed.
+
+    One supervisor thread owns the whole lifecycle: it idles while the
+    feature is off or no callsign is configured, connects and logs in when
+    it is, streams reports into the store, and reconnects with exponential
+    backoff on any failure. Settings changes are picked up by bumping
+    `_generation`, which makes the read loop drop the current connection and
+    come back around with the new configuration."""
+
+    def __init__(self, store: RbnStore, log_queue: queue.Queue) -> None:
+        self.store = store
+        self.log_queue = log_queue
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = threading.Event()
+        self._callsign = ""
+        self._enabled = False
+        self._generation = 0
+        self._sock: socket.socket | None = None
+        self._connected = False
+        self._status = "aus"
+        self._thread: threading.Thread | None = None
+        self._backoff = RBN_RECONNECT_INITIAL_SECONDS
+
+    # -- public API (called from the Tk main thread) ------------------------
+
+    def start(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True)
+            self._thread.start()
+
+    def configure(self, enabled: bool, callsign: str) -> None:
+        callsign = (callsign or "").strip().upper()
+        with self._lock:
+            if enabled == self._enabled and callsign == self._callsign:
+                return
+            self._enabled = enabled
+            self._callsign = callsign
+            self._generation += 1
+        self._drop_socket()
+        self._wake.set()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._wake.set()
+        self._drop_socket()
+
+    @property
+    def connected(self) -> bool:
+        return self._connected
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    # -- internals ----------------------------------------------------------
+
+    def _log(self, message: str) -> None:
+        self.log_queue.put(f"RBN: {message}")
+
+    def _drop_socket(self) -> None:
+        """Unblocks a thread parked in recv() - shutdown() rather than
+        close() alone, since closing a socket another thread is reading does
+        not reliably wake it up."""
+        with self._lock:
+            sock = self._sock
+            self._sock = None
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                enabled, callsign, generation = self._enabled, self._callsign, self._generation
+            if not enabled or not callsign:
+                self._connected = False
+                self._status = "aus" if not enabled else "kein Rufzeichen"
+                # configure()/stop() both set the event, so this is only a
+                # safety net, not the actual wakeup path.
+                self._wake.wait(5.0)
+                self._wake.clear()
+                continue
+            try:
+                self._session(callsign, generation)
+            except Exception as exc:  # noqa: BLE001 - a reader thread must never die
+                self._connected = False
+                with self._lock:
+                    current_generation = self._generation
+                # A drop we caused ourselves (settings change, shutdown) is
+                # not a failure and must neither be logged nor backed off.
+                if self._stop.is_set() or current_generation != generation:
+                    continue
+                self._status = "Fehler"
+                self._log(f"Verbindung fehlgeschlagen ({exc}), neuer Versuch in {self._backoff:.0f}s.")
+                self._wake.wait(self._backoff)
+                self._wake.clear()
+                self._backoff = min(self._backoff * 2, RBN_RECONNECT_MAX_SECONDS)
+            finally:
+                self._connected = False
+                self._drop_socket()
+
+    def _session(self, callsign: str, generation: int) -> None:
+        self._status = "verbinde…"
+        sock = socket.create_connection((RBN_HOST, RBN_PORT), timeout=RBN_LOGIN_TIMEOUT)
+        with self._lock:
+            if self._stop.is_set() or self._generation != generation:
+                sock.close()
+                return
+            self._sock = sock
+
+        buffer = b""
+        # The server greets with a banner and asks for a callsign; the
+        # prompt has no trailing newline, so this waits for the word rather
+        # than for a line. Sending unprompted after the timeout is the
+        # documented fallback behaviour of the usual cluster clients.
+        deadline = time.monotonic() + RBN_LOGIN_TIMEOUT
+        while True:
+            if b"call" in buffer.lower():
+                break
+            if time.monotonic() >= deadline:
+                break
+            try:
+                chunk = sock.recv(4096)
+            except socket.timeout:
+                break
+            if not chunk:
+                raise ConnectionError("Verbindung vor dem Login geschlossen")
+            buffer += chunk
+            # Only the tail can still contain the prompt, and a server that
+            # floods without ever asking must not grow this without bound.
+            buffer = buffer[-8192:]
+        sock.sendall(f"{callsign}\r\n".encode("ascii", "ignore"))
+        buffer = b""
+
+        sock.settimeout(RBN_SOCKET_TIMEOUT)
+        self._connected = True
+        self._status = "verbunden"
+        # Reset here rather than on a clean return from _session(): a live
+        # session almost always *ends* in an exception (the far end drops
+        # it), so keying the reset off that would let the delay ratchet up
+        # to the maximum across sessions that were each perfectly healthy.
+        self._backoff = RBN_RECONNECT_INITIAL_SECONDS
+        self._log(f"verbunden mit {RBN_HOST}:{RBN_PORT} als {callsign}.")
+
+        while not self._stop.is_set():
+            with self._lock:
+                if self._generation != generation:
+                    return
+            chunk = sock.recv(4096)
+            if not chunk:
+                raise ConnectionError("Gegenstelle hat die Verbindung geschlossen")
+            buffer += chunk
+            # Guard against a stream that never sends a newline (a stuck
+            # server or a binary/telnet-negotiation burst) growing forever.
+            if len(buffer) > 1 << 20:
+                buffer = b""
+                continue
+            *lines, buffer = buffer.split(b"\n")
+            for raw in lines:
+                report = parse_rbn_line(raw.decode("latin-1", "replace"))
+                if report is not None:
+                    self.store.add(report)
 
 
 def _patch_tkintermapview_tile_loading() -> None:
@@ -1621,6 +2457,7 @@ COL_FAVORITE_BG = "#4a3a0d"
 COL_OUTDOOR_BG = "#0d3a4a"
 COL_WORKED_BG = "#0a1a0a"
 COL_QSY_BG = "#1b4f72"
+COL_HEAR_CIRCLE = "#e08a3c"
 
 
 def apply_dark_titlebar(window) -> bool:
@@ -1743,6 +2580,29 @@ class App(tk.Tk):
         self.locator_lookup_pending: set[str] = set()
         self.locator_result_queue: queue.Queue = queue.Queue()
         self.locator_work_queue: queue.Queue = queue.Queue()
+
+        # Park coordinates: primary source for map pins, the KM column and
+        # the QSY line. Comes free with the spot feed for most spots and is
+        # resolved per reference for the rest - either way it needs no QRZ
+        # subscription, unlike the callsign lookup above.
+        self.park_cache: dict[str, tuple[float, float] | None] = load_park_cache()
+        self.park_lookup_pending: set[str] = set()
+        self.park_result_queue: queue.Queue = queue.Queue()
+        self.park_work_queue: queue.Queue = queue.Queue()
+        self._park_miss_logged = False
+
+        # Reverse Beacon Network -> "Chance to Hear" column.
+        self.rbn_enabled_var = tk.BooleanVar(value=config.get("rbn_enabled", False))
+        self.rbn_store = RbnStore()
+        self.rbn_client = RbnClient(self.rbn_store, self.log_result_queue)
+        self.rbn_badge_var = tk.StringVar(value="RBN aus")
+        self._chance_cache: dict[int, ChanceToHear | None] = {}
+        self._my_latlon: tuple[float, float] | None = None
+        self._regional_skimmers_active = 0
+        self._rbn_next_badge_at = 0.0
+        self._rbn_next_prune_at = time.monotonic() + RBN_PRUNE_INTERVAL_SECONDS
+        self._rbn_next_render_at = time.monotonic() + RBN_RENDER_REFRESH_SECONDS
+        self._rbn_last_rendered_reports = -1
         self.favorite_calls: set[str] = set(config.get("favorite_calls", []))
         self.outdoor_calls: set[str] = set()
 
@@ -1808,6 +2668,10 @@ class App(tk.Tk):
         threading.Thread(target=self._load_outdoor_calls_async, daemon=True).start()
         for _ in range(LOCATOR_WORKER_COUNT):
             threading.Thread(target=self._locator_worker, daemon=True).start()
+        for _ in range(PARK_WORKER_COUNT):
+            threading.Thread(target=self._park_worker, daemon=True).start()
+        self.rbn_client.start()
+        self._apply_rbn_settings()
         self._tick_solar_data()
         self.after(200, self._tick)
         self._tick_clock()
@@ -1859,6 +2723,14 @@ class App(tk.Tk):
                  font=("Consolas", 11, "bold")).pack(side="right", padx=(8, 0))
         self.cat_badge = _badge(title_row, textvariable=self.cat_badge_var, fg="white", bg=COL_RED)
         self.cat_badge.pack(side="right", padx=6)
+        # Clickable: the RBN feature is off by default (it opens a permanent
+        # connection to an outside service and logs in with the user's
+        # callsign, so it shouldn't just start on its own), and this badge
+        # is the one-click way to turn it on without going into Settings.
+        self.rbn_badge = _badge(title_row, textvariable=self.rbn_badge_var, fg=COL_MUTED, bg=COL_PANEL_ALT)
+        self.rbn_badge.pack(side="right", padx=6)
+        self.rbn_badge.configure(cursor="hand2")
+        self.rbn_badge.bind("<Button-1>", lambda _e: self._toggle_rbn())
         _badge(title_row, textvariable=self.count_badge_var, fg=COL_TEXT, bg=COL_PANEL_ALT).pack(side="right", padx=6)
         _badge(
             title_row, textvariable=self.solar_data_var, fg=COL_AMBER, bg=COL_PANEL_ALT,
@@ -1950,20 +2822,22 @@ class App(tk.Tk):
 
         columns = (
             "fav", "outdoor", "qsy", "call", "op", "worked", "freq", "mode", "ref", "name", "loc",
-            "dist", "age", "skip", "log",
+            "dist", "chance", "age", "skip", "log",
         )
         headers = {
             "fav": "", "outdoor": "", "qsy": "", "call": "CALLSIGN", "op": "OP", "worked": "HEUTE",
             "freq": "FREQ (KHZ)", "mode": "MODE", "ref": "REF", "name": "NAME", "loc": "LOC", "dist": "KM",
-            "age": "AGE", "skip": "", "log": "",
+            "chance": "HÖRCHANCE", "age": "AGE", "skip": "", "log": "",
         }
         widths = {
             "fav": 30, "outdoor": 30, "qsy": 60, "call": 90, "op": 120, "worked": 220, "freq": 90, "mode": 70,
-            "ref": 90, "name": 260, "loc": 70, "dist": 55, "age": 60, "skip": 60, "log": 70,
+            "ref": 90, "name": 260, "loc": 70, "dist": 55, "chance": 100, "age": 60, "skip": 60, "log": 70,
         }
         self.column_headers = headers
         self.all_columns = columns
-        sortable_columns = {"call", "op", "worked", "freq", "mode", "ref", "name", "loc", "dist", "age"}
+        sortable_columns = {
+            "call", "op", "worked", "freq", "mode", "ref", "name", "loc", "dist", "chance", "age",
+        }
         self.tree = ttk.Treeview(list_pane, columns=columns, show="headings", height=18)
         for col in columns:
             if col in sortable_columns:
@@ -1972,7 +2846,7 @@ class App(tk.Tk):
                 self.tree.heading(col, text=headers[col])
             anchor = "center" if col in ("fav", "outdoor", "qsy", "skip", "mode", "age", "loc", "dist") else "w"
             self.tree.column(col, width=widths[col], anchor=anchor)
-        self._update_qrz_column_visibility()
+        self._update_optional_column_visibility()
 
         vsb = ttk.Scrollbar(list_pane, orient="vertical", command=self.tree.yview,
                              style="Dark.Vertical.TScrollbar")
@@ -2323,7 +3197,7 @@ class App(tk.Tk):
 
         ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
 
-        tk.Label(content, text="QRZ XML-Lookup (Entfernung zum Aktivator)", fg=COL_ACCENT, bg=COL_PANEL,
+        tk.Label(content, text="QRZ XML-Lookup (Name des Aktivators)", fg=COL_ACCENT, bg=COL_PANEL,
                  font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
 
         qrz_xml_user_row = row(content, "QRZ-Benutzer")
@@ -2338,10 +3212,39 @@ class App(tk.Tk):
             content, text="Eigener QRZ.com-Login (nicht der Logbook-API-Key oben) - nötig für\n"
                       "die kostenpflichtige XML-Lookup-Funktion. Mit beiden Feldern hier\n"
                       "ausgefüllt erscheint die OP-Spalte (Name des Aktivators) in der\n"
-                      "Spot-Liste; zusätzlich mit eingetragenem 'Eig. Locator' oben auch\n"
-                      "die KM-Spalte (Entfernung) - beide werden pro Spot automatisch\n"
-                      "abgefragt. Leer lassen (eines der Felder reicht) = beide Spalten\n"
-                      "bleiben aus, keine Abfragen.",
+                      "Spot-Liste. Leer lassen = Spalte bleibt aus, keine Abfragen.\n"
+                      "Für Karte und KM-Spalte wird das nicht mehr gebraucht: die kommen\n"
+                      "aus den Koordinaten der Park-Referenz und damit von POTA selbst.\n"
+                      "QRZ dient dort nur noch als Notnagel für die seltenen Parks ohne\n"
+                      "hinterlegte Position.",
+            fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
+        ).pack(fill="x", padx=14, pady=(0, 8))
+
+        ttk.Separator(content, orient="horizontal").pack(fill="x", padx=14, pady=(0, 6))
+
+        tk.Label(content, text="Hörchance (Reverse Beacon Network)", fg=COL_ACCENT, bg=COL_PANEL,
+                 font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=14, pady=(0, 0))
+
+        tk.Checkbutton(
+            content, text="RBN-Daten abrufen und Spalte HÖRCHANCE anzeigen",
+            variable=self.rbn_enabled_var, command=self._on_rbn_toggle,
+            fg=COL_TEXT, bg=COL_PANEL, selectcolor=COL_PANEL_ALT,
+            activebackground=COL_PANEL, activeforeground=COL_TEXT,
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(fill="x", padx=14, pady=(4, 4))
+
+        tk.Label(
+            content, text="Verbindet sich mit telnet.reversebeacon.net und wertet aus, wie\n"
+                      "stark die Skimmer-Empfänger in deiner Umgebung einen Aktivator\n"
+                      "gerade hören - daraus wird eine Prozentzahl für deine eigene\n"
+                      "Hörchance geschätzt. Kostenlos und ohne Anmeldung, es werden nur\n"
+                      "'Eig. Rufzeichen' (als Login) und 'Eig. Locator' (für die Entfernung\n"
+                      "zu den Skimmern) von oben gebraucht. Funktioniert nur für CW und\n"
+                      "RTTY - dort schaut kein Skimmer hin, steht in der Spalte '–'.\n"
+                      "'~' vor dem Wert = Schätzung, weil gerade kein Skimmer in deiner\n"
+                      "Nähe aktiv ist. Per QSY zeigt die Karte zusätzlich einen Ring um\n"
+                      "den Park: wie weit der Aktivator laut RBN gerade maximal gehört\n"
+                      "wird.",
             fg=COL_MUTED, bg=COL_PANEL, font=("Segoe UI", 7), justify="left", anchor="w",
         ).pack(fill="x", padx=14, pady=(0, 8))
 
@@ -2388,14 +3291,35 @@ class App(tk.Tk):
             "respot_template": self.respot_template_var.get().strip() or RESPOT_TEMPLATE_DEFAULT,
             "ssb_power": self.ssb_power_var.get(),
             "cw_power": self.cw_power_var.get(),
+            "rbn_enabled": bool(self.rbn_enabled_var.get()),
         })
         save_config(config)
         self.qrz_xml_auth_failed = False
         self.qrz_xml_client.session_key = None
-        self._update_qrz_column_visibility()
+        self._update_optional_column_visibility()
         self._update_own_qth_marker()
         self._update_map_hint()
+        # The callsign doubles as the RBN login, so a changed one has to
+        # reach the client here too (a no-op when nothing relevant changed).
+        self._apply_rbn_settings()
+        self._render_spots()
         self._log("Log-/QRZ-Einstellungen gespeichert.")
+
+    def _on_rbn_toggle(self) -> None:
+        enabled = bool(self.rbn_enabled_var.get())
+        config = load_config()
+        config["rbn_enabled"] = enabled
+        save_config(config)
+        self._apply_rbn_settings()
+        self._render_spots()
+        if enabled and not self.my_callsign_var.get().strip():
+            self._log("RBN: 'Eig. Rufzeichen' in den Settings eintragen - es dient als Login.")
+        if enabled and grid_to_latlon(self.my_grid_var.get()) is None:
+            self._log("RBN: ohne 'Eig. Locator' kann keine Hörchance berechnet werden.")
+
+    def _toggle_rbn(self) -> None:
+        self.rbn_enabled_var.set(not self.rbn_enabled_var.get())
+        self._on_rbn_toggle()
 
     # -- rigctld model list / auto-launch --------------------------------------
 
@@ -2983,15 +3907,16 @@ class App(tk.Tk):
             and not self.qrz_xml_auth_failed
         )
 
-    def _update_qrz_column_visibility(self) -> None:
-        # KM and OP both come from the same paid QRZ XML lookup - hide both
-        # together rather than showing an always-empty column when no
-        # QRZ XML credentials are configured.
-        show_qrz_columns = self._qrz_xml_ready()
-        qrz_only_columns = ("dist", "op")
-        self.tree["displaycolumns"] = [
-            c for c in self.all_columns if show_qrz_columns or c not in qrz_only_columns
-        ]
+    def _update_optional_column_visibility(self) -> None:
+        # OP is the only column still tied to the paid QRZ XML lookup - KM
+        # now comes from the park's own coordinates, so it stays visible for
+        # everyone. HÖRCHANCE is only meaningful with the RBN feed running.
+        hidden: set[str] = set()
+        if not self._qrz_xml_ready():
+            hidden.add("op")
+        if not self.rbn_enabled_var.get():
+            hidden.add("chance")
+        self.tree["displaycolumns"] = [c for c in self.all_columns if c not in hidden]
 
     # -- world map ------------------------------------------------------------
 
@@ -3024,18 +3949,21 @@ class App(tk.Tk):
         self.spot_markers: list = []
         self.qsy_line = None
         self.qsy_line_label = None
+        self.qsy_hear_circle = None
+        self.qsy_hear_circle_label = None
         self._qsy_line_animation_job = None
         self._qsy_line_dash_offset = 0
         self._update_own_qth_marker()
         self._update_map_hint()
 
     def _update_map_hint(self) -> None:
-        # Red (other-spot) markers need the same paid QRZ XML lookup as the
-        # OP/KM columns - own-location green marker works without it, so
-        # this only explains why the map might be showing green alone.
+        # Spot markers sit on the *park's* coordinates now, which come from
+        # POTA itself and need no credentials at all - the only thing that
+        # can still be missing is the user's own locator for the green
+        # marker and the distance column.
         self.map_hint_var.set(
-            "" if self._qrz_xml_ready() else
-            "Rote Punkte (Aktivatoren) brauchen QRZ-XML-Zugangsdaten in den Settings."
+            "" if grid_to_latlon(self.my_grid_var.get()) is not None else
+            "Für Entfernung und eigenen Standort auf der Karte: 'Eig. Locator' in den Settings eintragen."
         )
 
     def _update_own_qth_marker(self) -> None:
@@ -3069,18 +3997,19 @@ class App(tk.Tk):
             marker.delete()
         self.spot_markers = []
         self._update_map_hint()
-        if not self._qrz_xml_ready():
-            return
+        # One pin per park reference (not per callsign): the reference is
+        # what actually has a position, and two activators in the same park
+        # would otherwise stack two markers on the identical coordinates.
         plotted: set[str] = set()
         for spot in visible_spots:
-            base_call = base_callsign_for_lookup(spot.activator)
-            if not base_call or base_call in plotted:
+            key = (spot.reference or "").strip().upper() or base_callsign_for_lookup(spot.activator)
+            if not key or key in plotted:
                 continue
-            info = self.locator_cache.get(base_call)
-            if not info or not info.latlon:
+            latlon = self._spot_latlon(spot)
+            if latlon is None:
                 continue
-            plotted.add(base_call)
-            lat, lon = info.latlon
+            plotted.add(key)
+            lat, lon = latlon
             band = band_for_khz(spot.frequency_khz)
             marker = self.map_widget.set_marker(
                 lat, lon, text=spot.activator,
@@ -3203,22 +4132,26 @@ class App(tk.Tk):
         if self.qsy_line_label is not None:
             self.qsy_line_label.delete()
             self.qsy_line_label = None
+        if self.qsy_hear_circle is not None:
+            self.qsy_hear_circle.delete()
+            self.qsy_hear_circle = None
+        if self.qsy_hear_circle_label is not None:
+            self.qsy_hear_circle_label.delete()
+            self.qsy_hear_circle_label = None
 
     def _update_qsy_line(self, spot: Spot) -> None:
         """Draws an animated dashed line from the own QTH to the spot just
-        QSY'd to, labelled with the great-circle-ish distance - same
-        QRZ XML coordinates as the map markers/KM column, so it needs the
-        same paid lookup configured."""
+        QSY'd to, labelled with the great-circle-ish distance - same park
+        coordinates as the map markers and the KM column. Also draws a ring
+        around the activator showing how far they're currently being heard
+        (see _draw_hear_circle) when RBN data for them is available."""
         self._clear_qsy_line()
-        if not self._qrz_xml_ready():
-            return
         my_latlon = grid_to_latlon(self.my_grid_var.get())
         if my_latlon is None:
             return
-        info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
-        if not info or not info.latlon:
+        target_latlon = self._spot_latlon(spot)
+        if target_latlon is None:
             return
-        target_latlon = info.latlon
         km = haversine_km(my_latlon[0], my_latlon[1], target_latlon[0], target_latlon[1])
 
         self.qsy_line = self.map_widget.set_path([my_latlon, target_latlon], color=COL_ACCENT, width=3)
@@ -3242,6 +4175,47 @@ class App(tk.Tk):
         self.qsy_line_label.text_y_offset = -18
         self.qsy_line_label.draw()
 
+        self._draw_hear_circle(spot, target_latlon)
+
+    def _draw_hear_circle(self, spot: Spot, center_latlon: tuple[float, float]) -> None:
+        """Ring around the activator's park at the distance of the
+        farthest-away RBN skimmer currently hearing them on this band - a
+        live, measured "how far does his signal actually reach right now"
+        indicator, not a modelled propagation contour. Requires the RBN
+        feature on and at least one located skimmer report; otherwise draws
+        nothing (silently - the HÖRCHANCE column's own '–'/'aus' already
+        covers explaining why)."""
+        if not self.rbn_enabled_var.get():
+            return
+        call = base_callsign_for_lookup(spot.activator)
+        band = band_for_khz(spot.frequency_khz)
+        if not call or band == "?":
+            return
+        farthest_km = 0.0
+        farthest_skimmer = ""
+        for report in self.rbn_store.reports_for(call, band):
+            skimmer_pos = skimmer_latlon(report.skimmer)
+            if skimmer_pos is None:
+                continue
+            dist = haversine_km(center_latlon[0], center_latlon[1], skimmer_pos[0], skimmer_pos[1])
+            if dist > farthest_km:
+                farthest_km = dist
+                farthest_skimmer = report.skimmer
+        if farthest_km <= 0:
+            return
+
+        points = circle_points_km(center_latlon[0], center_latlon[1], farthest_km, RBN_HEAR_CIRCLE_SEGMENTS)
+        self.qsy_hear_circle = self.map_widget.set_polygon(
+            points, outline_color=COL_HEAR_CIRCLE, fill_color=None, border_width=2,
+        )
+        label_lat, label_lon = destination_point_km(center_latlon[0], center_latlon[1], 0.0, farthest_km)
+        self.qsy_hear_circle_label = self.map_widget.set_marker(
+            label_lat, label_lon, text=f"max. gehört ~{farthest_km:.0f} km ({farthest_skimmer})",
+            icon=self._map_icon_blank, icon_anchor="center", text_color=COL_HEAR_CIRCLE,
+        )
+        self.qsy_hear_circle_label.text_y_offset = -10
+        self.qsy_hear_circle_label.draw()
+
     def _animate_qsy_line(self) -> None:
         if self.qsy_line is None or self.qsy_line.canvas_line is None:
             self._qsy_line_animation_job = None
@@ -3250,20 +4224,159 @@ class App(tk.Tk):
         self.map_widget.canvas.itemconfig(self.qsy_line.canvas_line, dashoffset=self._qsy_line_dash_offset)
         self._qsy_line_animation_job = self.after(80, self._animate_qsy_line)
 
+    def _spot_latlon(self, spot: Spot) -> tuple[float, float] | None:
+        """Where the activator physically is. The park reference is the
+        authoritative answer - it's a fixed, published location, unlike the
+        activator's QRZ home address, which is where they live rather than
+        where they're currently sitting in a park. QRZ is only consulted as
+        a last resort for spots whose reference has no coordinates."""
+        if spot.park_latlon is not None:
+            return spot.park_latlon
+        reference = (spot.reference or "").strip().upper()
+        if reference:
+            # A cached None means POTA itself has no position for this
+            # reference - falling through to QRZ below is then the only
+            # remaining option, and _queue_park_lookups() won't ask again.
+            cached = self.park_cache.get(reference)
+            if cached is not None:
+                return cached
+        if self._qrz_xml_ready():
+            info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
+            if info and info.latlon:
+                return info.latlon
+        return None
+
     def _spot_distance_km(self, spot: Spot) -> float | None:
-        if not self._qrz_xml_ready():
-            return None
         my_latlon = grid_to_latlon(self.my_grid_var.get())
         if my_latlon is None:
             return None
-        info = self.locator_cache.get(base_callsign_for_lookup(spot.activator))
-        if not info or not info.latlon:
+        target = self._spot_latlon(spot)
+        if target is None:
             return None
-        return haversine_km(my_latlon[0], my_latlon[1], info.latlon[0], info.latlon[1])
+        return haversine_km(my_latlon[0], my_latlon[1], target[0], target[1])
 
     def _format_distance(self, spot: Spot) -> str:
         dist = self._spot_distance_km(spot)
         return f"{dist:.0f}" if dist is not None else ""
+
+    # -- park reference -> coordinates -----------------------------------------
+
+    def _queue_park_lookups(self, spots: list[Spot]) -> None:
+        """Only spots whose own feed entry carried no coordinates need the
+        per-park endpoint, so in practice this queue stays near-empty."""
+        for spot in spots:
+            if spot.park_latlon is not None:
+                continue
+            reference = (spot.reference or "").strip().upper()
+            if not reference or reference in self.park_cache or reference in self.park_lookup_pending:
+                continue
+            self.park_lookup_pending.add(reference)
+            self.park_work_queue.put(reference)
+
+    def _park_worker(self) -> None:
+        while True:
+            reference = self.park_work_queue.get()
+            try:
+                latlon = fetch_park_info(reference)
+                save_park_cache_entry(reference, latlon)
+                self.park_result_queue.put(("ok", reference, latlon))
+            except Exception as exc:  # noqa: BLE001 - worker must not die
+                # Deliberately not cached: a failed request says nothing
+                # about whether this park has coordinates, so the next spot
+                # poll re-queues it instead of writing a sticky "no
+                # position" that would survive for PARK_CACHE_MISS_TTL.
+                self.park_result_queue.put(("error", reference, str(exc)))
+            finally:
+                self.park_work_queue.task_done()
+
+    # -- RBN "Chance to Hear" ---------------------------------------------------
+
+    def _apply_rbn_settings(self) -> None:
+        self.rbn_client.configure(bool(self.rbn_enabled_var.get()), self.my_callsign_var.get())
+        self._update_optional_column_visibility()
+        self._update_rbn_badge()
+
+    def _update_rbn_badge(self) -> None:
+        if not self.rbn_enabled_var.get():
+            self.rbn_badge_var.set("RBN aus")
+            self.rbn_badge.configure(fg=COL_MUTED)
+            return
+        status = self.rbn_client.status
+        if self.rbn_client.connected:
+            calls, reports = self.rbn_store.stats()
+            self.rbn_badge_var.set(f"RBN {reports} Rprt · {calls} Calls")
+            self.rbn_badge.configure(fg=COL_GREEN)
+        else:
+            self.rbn_badge_var.set(f"RBN {status}")
+            self.rbn_badge.configure(fg=COL_AMBER)
+
+    def _tick_rbn(self) -> None:
+        """Called from the 200 ms UI tick. Everything in here is on its own
+        much slower timer - the RBN feed delivers several reports a second,
+        and neither the badge nor a full table redraw should follow that."""
+        now = time.monotonic()
+        if now >= self._rbn_next_badge_at:
+            self._rbn_next_badge_at = now + RBN_BADGE_REFRESH_SECONDS
+            self._update_rbn_badge()
+        if now >= self._rbn_next_prune_at:
+            self._rbn_next_prune_at = now + RBN_PRUNE_INTERVAL_SECONDS
+            self.rbn_store.prune()
+        if not self.rbn_enabled_var.get():
+            return
+        if now >= self._rbn_next_render_at:
+            self._rbn_next_render_at = now + RBN_RENDER_REFRESH_SECONDS
+            _, reports = self.rbn_store.stats()
+            if reports != self._rbn_last_rendered_reports:
+                self._rbn_last_rendered_reports = reports
+                self._render_spots()
+
+    def _refresh_chance_context(self) -> None:
+        """Per-render setup for the HÖRCHANCE column: the user's own
+        position and how many skimmers are active near them (see
+        chance_to_hear - that count decides whether "no nearby skimmer heard
+        it" means anything)."""
+        self._chance_cache = {}
+        self._my_latlon = grid_to_latlon(self.my_grid_var.get())
+        self._regional_skimmers_active = 0
+        if self._my_latlon is None or not self.rbn_enabled_var.get():
+            return
+        lat, lon = self._my_latlon
+        for skimmer in self.rbn_store.active_skimmers():
+            latlon = skimmer_latlon(skimmer)
+            if latlon is not None and haversine_km(lat, lon, latlon[0], latlon[1]) <= RBN_REGION_RADIUS_KM:
+                self._regional_skimmers_active += 1
+
+    def _chance_for_spot(self, spot: Spot) -> ChanceToHear | None:
+        if self._my_latlon is None or not self.rbn_enabled_var.get():
+            return None
+        if spot.spot_id in self._chance_cache:
+            return self._chance_cache[spot.spot_id]
+        call = base_callsign_for_lookup(spot.activator)
+        band = band_for_khz(spot.frequency_khz)
+        result = None
+        if call and band != "?":
+            result = chance_to_hear(
+                self.rbn_store.reports_for(call, band),
+                self._my_latlon,
+                self._regional_skimmers_active,
+            )
+        self._chance_cache[spot.spot_id] = result
+        return result
+
+    def _format_chance(self, spot: Spot) -> str:
+        if not self.rbn_enabled_var.get():
+            return ""
+        if self._my_latlon is None:
+            return "?"
+        chance = self._chance_for_spot(spot)
+        if chance is None:
+            # No skimmer heard this station on this band recently. For CW
+            # that is itself mildly informative; for SSB/FT8 the RBN's CW
+            # feed simply never covers it, so neither is dressed up as a
+            # number here.
+            return "–"
+        prefix = "~" if chance.estimate else ""
+        return f"{prefix}{chance.score}% {chance.quality}"
 
     def _spot_op_name(self, spot: Spot) -> str:
         if not self._qrz_xml_ready():
@@ -3310,6 +4423,10 @@ class App(tk.Tk):
             return lambda s: spot_age_seconds(s.spot_time)
         if col == "dist":
             return lambda s: (d if (d := self._spot_distance_km(s)) is not None else 10**9)
+        if col == "chance":
+            # Descending by default (best chance on top on the first click),
+            # so the key is negated - spots with no RBN data sort last.
+            return lambda s: -(c.score if (c := self._chance_for_spot(s)) is not None else -1)
         if col == "call":
             return lambda s: (s.activator or "").upper()
         if col == "op":
@@ -3344,6 +4461,9 @@ class App(tk.Tk):
 
     def _render_spots(self) -> None:
         self.tree.delete(*self.tree.get_children())
+        # Must run before the sort below: _column_sort_key("chance") scores
+        # spots against exactly this context.
+        self._refresh_chance_context()
         visible = [s for s in self.spots if self._spot_passes_filters(s)]
         # Stable sort, least significant first: column sort (if any) orders
         # spots within each favorite/outdoor group, then the priority sort
@@ -3399,6 +4519,7 @@ class App(tk.Tk):
                 name,
                 spot.location_desc,
                 self._format_distance(spot),
+                self._format_chance(spot),
                 format_age(spot.spot_time),
                 "✕ Skip",
                 "📝 Log",
@@ -3414,7 +4535,7 @@ class App(tk.Tk):
         # identify_column() numbers columns by their current *display*
         # position, not their fixed position in `columns` - and the "dist"
         # and "op" columns are shown/hidden at runtime (see
-        # _update_qrz_column_visibility), which shifts everything after
+        # _update_optional_column_visibility), which shifts everything after
         # them. Resolve the clicked column name from the live
         # displaycolumns instead of a hardcoded "#N", so Skip/Log etc.
         # keep working either way.
@@ -3803,6 +4924,7 @@ class App(tk.Tk):
                     self.spots = payload
                     self._update_country_options()
                     self._queue_locator_lookups(payload)
+                    self._queue_park_lookups(payload)
                     self._render_spots()
                     self._log(f"{len(self.spots)} Spots aktualisiert.")
                 else:
@@ -3837,12 +4959,40 @@ class App(tk.Tk):
                     locator_changed = True
                 elif kind == "auth_error":
                     self.qrz_xml_auth_failed = True
-                    self._update_qrz_column_visibility()
+                    self._update_optional_column_visibility()
                     self._log(f"QRZ-XML-Login fehlgeschlagen: {payload}")
         except queue.Empty:
             pass
         if locator_changed:
             self._render_spots()
+
+        park_changed = False
+        try:
+            while True:
+                kind, reference, payload = self.park_result_queue.get_nowait()
+                self.park_lookup_pending.discard(reference)
+                if kind == "ok":
+                    self.park_cache[reference] = payload
+                    park_changed = True
+                    if payload is None and not self._park_miss_logged:
+                        # Couldn't be verified against the live endpoint
+                        # while this was written, so say it out loud once
+                        # rather than silently showing an empty KM column if
+                        # the response shape ever differs from the spot
+                        # feed's (which uses latitude/longitude/grid6).
+                        self._park_miss_logged = True
+                        self._log(
+                            f"Park {reference}: keine Koordinaten in der POTA-Antwort - "
+                            f"Karte/KM fallen für diesen Park auf QRZ zurück."
+                        )
+                else:
+                    self._log(f"Park {reference} konnte nicht geladen werden: {payload}")
+        except queue.Empty:
+            pass
+        if park_changed:
+            self._render_spots()
+
+        self._tick_rbn()
 
         try:
             while True:
@@ -3892,6 +5042,7 @@ class App(tk.Tk):
 
     def destroy(self) -> None:
         self.stop_poll_event.set()
+        self.rbn_client.stop()
         if self.tune.active:
             self.tune.stop()
         self.cat.disconnect()
